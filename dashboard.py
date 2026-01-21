@@ -1,0 +1,847 @@
+#!/usr/bin/env python3
+"""
+Dashboard de Gerenciamento da Automação Gmail → MeisterTask
+Sistema com validação manual em múltiplas etapas
+"""
+import streamlit as st
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
+import pickle
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+import base64
+from email.mime.text import MIMEText
+import re
+from openai import OpenAI
+import html2text
+import requests
+
+# Configuração da página
+st.set_page_config(
+    page_title="Automação Gmail → MeisterTask",
+    page_icon="📧",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Função para carregar variáveis do .env
+def load_env_var(key, default=''):
+    """Carrega variável do arquivo .env"""
+    if os.path.exists('.env'):
+        with open('.env', 'r') as f:
+            for line in f:
+                if line.strip() and not line.startswith('#') and '=' in line:
+                    k, v = line.strip().split('=', 1)
+                    if k == key:
+                        return v
+    return default
+
+# Inicializar session state
+if 'current_step' not in st.session_state:
+    st.session_state.current_step = 1  # 1=Filtros, 2=Emails, 3=Publicações, 4=Tarefas
+
+if 'filtered_emails' not in st.session_state:
+    st.session_state.filtered_emails = []
+
+if 'selected_email_ids' not in st.session_state:
+    st.session_state.selected_email_ids = []
+
+if 'extracted_publications' not in st.session_state:
+    st.session_state.extracted_publications = []
+
+if 'selected_publication_ids' not in st.session_state:
+    st.session_state.selected_publication_ids = []
+
+if 'task_creation_results' not in st.session_state:
+    st.session_state.task_creation_results = None
+
+if 'filters' not in st.session_state:
+    st.session_state.filters = {
+        'text_search': '',
+        'date_from': None,
+        'date_to': None,
+        'read_status': 'unread'  # unread, read, all
+    }
+
+# Função para conectar ao Gmail
+def get_gmail_service():
+    """Conecta ao Gmail API"""
+    SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+    creds = None
+    
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists('credentials.json'):
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    
+    return build('gmail', 'v1', credentials=creds)
+
+# Função para buscar emails com filtros
+def search_emails(service, filters):
+    """Busca emails baseado nos filtros"""
+    if not service:
+        return []
+    
+    query_parts = []
+    
+    # Filtro de texto (assunto ou corpo)
+    if filters.get('text_search'):
+        query_parts.append(f'({filters["text_search"]})')
+    
+    # Filtro de data
+    if filters.get('date_from'):
+        query_parts.append(f'after:{filters["date_from"]}')
+    if filters.get('date_to'):
+        query_parts.append(f'before:{filters["date_to"]}')
+    
+    # Filtro de lido/não lido
+    if filters.get('read_status') == 'unread':
+        query_parts.append('is:unread')
+    elif filters.get('read_status') == 'read':
+        query_parts.append('is:read')
+    
+    query = ' '.join(query_parts) if query_parts else 'in:inbox'
+    
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            q=query,
+            maxResults=50
+        ).execute()
+        
+        messages = results.get('messages', [])
+        
+        email_list = []
+        for msg in messages:
+            msg_data = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='full'
+            ).execute()
+            
+            headers = msg_data['payload']['headers']
+            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), 'Sem assunto')
+            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), 'Desconhecido')
+            date = next((h['value'] for h in headers if h['name'].lower() == 'date'), 'Sem data')
+            
+            # Extrair corpo do email
+            body = extract_email_body(msg_data)
+            
+            # Verificar se está lido
+            is_read = 'UNREAD' not in msg_data.get('labelIds', [])
+            
+            email_list.append({
+                'id': msg['id'],
+                'subject': subject,
+                'sender': sender,
+                'date': date,
+                'body': body,
+                'is_read': is_read,
+                'raw_data': msg_data
+            })
+        
+        return email_list
+    
+    except Exception as e:
+        st.error(f"Erro ao buscar emails: {str(e)}")
+        return []
+
+# Função para extrair corpo do email
+def extract_email_body(message):
+    """Extrai o corpo do email e converte HTML para texto plano"""
+    h = html2text.HTML2Text()
+    h.ignore_links = False
+    h.ignore_images = True
+    h.ignore_emphasis = False
+    h.body_width = 0  # Sem quebra de linha automática
+    
+    try:
+        if 'parts' in message['payload']:
+            parts = message['payload']['parts']
+            body = ''
+            html_body = ''
+            
+            # Prioriza text/plain, mas guarda HTML como fallback
+            for part in parts:
+                if part['mimeType'] == 'text/plain':
+                    if 'data' in part['body']:
+                        body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+                elif part['mimeType'] == 'text/html':
+                    if 'data' in part['body']:
+                        html_body += base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+            
+            # Se não tem text/plain, converte HTML para texto
+            if not body and html_body:
+                body = h.handle(html_body)
+            
+            return body
+        else:
+            if 'data' in message['payload']['body']:
+                raw_data = base64.urlsafe_b64decode(message['payload']['body']['data']).decode('utf-8')
+                # Se parece com HTML, converte para texto
+                if raw_data.strip().startswith('<'):
+                    return h.handle(raw_data)
+                return raw_data
+    except:
+        return "Não foi possível extrair o corpo do email"
+    
+    return ""
+
+# Função para extrair publicações de um email
+def extract_publications_from_email(email_body, email_subject):
+    """
+    Extrai múltiplas publicações de processos judiciais de um email
+    Testa múltiplos padrões para encontrar as separações
+    """
+    publications = []
+    
+    # DEBUG: Mostra amostra do email
+    st.info(f"📝 Primeiros 500 caracteres do email:\n{email_body[:500]}")
+    
+    # Testa vários padrões possíveis em ordem de especificidade
+    patterns_to_try = [
+        (r'Publicação:\s*\d+\.\s+', 'Publicação: N. (com ponto e espaços)'),
+        (r'Publicação:\s*\d+\.', 'Publicação: N. (com ponto)'),
+        (r'Publicação:\s*\d+', 'Publicação: N (sem ponto)'),
+        (r'Publicação:', 'Publicação: (genérico)')
+    ]
+    
+    pub_matches = None
+    pattern_used = None
+    
+    for pattern, description in patterns_to_try:
+        matches = list(re.finditer(pattern, email_body, re.IGNORECASE))
+        if matches:
+            pub_matches = matches
+            pattern_used = description
+            st.info(f"🔍 Usando padrão: {description} - Encontradas {len(matches)} ocorrências")
+            break
+    
+    if not pub_matches:
+        st.warning("⚠️ Nenhum padrão de 'Publicação' encontrado. Tratando email como uma única publicação.")
+        publications.append({
+            'process_number': 'Sem número identificado',
+            'content': email_body[:5000],
+            'source_subject': email_subject
+        })
+        return publications
+    
+    # Para cada match, extrai o bloco completo
+    for i, match in enumerate(pub_matches):
+        # Início da publicação
+        start_pos = match.start()
+        
+        # Fim da publicação (início da próxima ou fim do texto)
+        end_pos = pub_matches[i + 1].start() if i + 1 < len(pub_matches) else len(email_body)
+        
+        # Extrai o conteúdo completo da publicação
+        pub_content = email_body[start_pos:end_pos].strip()
+        
+        # Tenta extrair número do processo (padrão brasileiro)
+        process_pattern = r'(\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4})'
+        process_match = re.search(process_pattern, pub_content)
+        process_number = process_match.group(0) if process_match else f'Publicação {i+1}'
+        
+        publications.append({
+            'process_number': process_number,
+            'content': pub_content,
+            'source_subject': email_subject
+        })
+    
+    st.success(f"✅ Extraídas {len(publications)} publicações usando padrão: {pattern_used}")
+    return publications
+
+# Função para extrair nomes das partes de uma publicação
+def extract_parties_from_publication(pub_content):
+    """
+    Extrai nomes das partes (autor/requerente vs réu/requerido) de uma publicação
+    """
+    parties = ""
+    
+    # Padrões comuns para identificar partes
+    patterns = [
+        # REQUERENTE: NOME vs REQUERIDO: NOME
+        r'REQUERENTE:\s*([^\n]+).*?REQUERIDO:\s*([^\n]+)',
+        # EXEQUENTE: NOME vs EXECUTADO: NOME
+        r'EXEQUENTE:\s*([^\n]+).*?EXECUTADO:\s*([^\n]+)',
+        # AUTOR: NOME vs RÉU: NOME
+        r'AUTOR:\s*([^\n]+).*?R[ÉE]U:\s*([^\n]+)',
+        # Partes: NOME vs NOME
+        r'Partes:\s*([^\n]+?)\s+vs\s+([^\n]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, pub_content, re.IGNORECASE | re.DOTALL)
+        if match:
+            party1 = match.group(1).strip()
+            party2 = match.group(2).strip()
+            
+            # Remove CPF/CNPJ e números
+            party1 = re.sub(r'\d{11,}', '', party1).strip()
+            party2 = re.sub(r'\d{11,}', '', party2).strip()
+            
+            # Limita tamanho
+            if len(party1) > 50:
+                party1 = party1[:50].strip()
+            if len(party2) > 50:
+                party2 = party2[:50].strip()
+            
+            parties = f"{party1} x {party2}"
+            break
+    
+    # Se não encontrou padrão, tenta pegar primeiros nomes encontrados
+    if not parties:
+        # Procura por linhas que começam com POLO ATIVO/PASSIVO
+        polo_ativo = re.search(r'POLO ATIVO:\s*([^\n]+)', pub_content, re.IGNORECASE)
+        polo_passivo = re.search(r'POLO PASSIVO:\s*([^\n]+)', pub_content, re.IGNORECASE)
+        
+        if polo_ativo and polo_passivo:
+            party1 = polo_ativo.group(1).strip()[:50]
+            party2 = polo_passivo.group(1).strip()[:50]
+            parties = f"{party1} x {party2}"
+    
+    return parties if parties else "Partes não identificadas"
+
+# Função para criar tarefa no MeisterTask
+def create_meistertask_task(process_number, parties, description, section_id, api_token):
+    """
+    Cria uma tarefa no MeisterTask via API
+    """
+    url = f"https://www.meistertask.com/api/sections/{section_id}/tasks"
+    
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Título: [numero do processo] - [nome das partes]
+    title = f"{process_number} - {parties}"
+    
+    # Limita tamanho do título (MeisterTask tem limite)
+    if len(title) > 250:
+        title = title[:247] + "..."
+    
+    payload = {
+        "name": title,
+        "notes": description
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        # MeisterTask retorna 200 ou 201 para sucesso
+        if response.status_code in [200, 201]:
+            return True, response.json()
+        else:
+            error_detail = f"Status {response.status_code}: {response.text}"
+            return False, error_detail
+            
+    except requests.exceptions.RequestException as e:
+        return False, f"Erro de conexão: {str(e)}"
+
+# =============================================================================
+# INTERFACE PRINCIPAL
+# =============================================================================
+
+st.title("📧 Sistema de Automação Gmail → MeisterTask")
+st.markdown("**Validação Manual em Múltiplas Etapas**")
+
+# Sidebar - Navegação e Status
+with st.sidebar:
+    st.header("📍 Etapas do Processo")
+    
+    # Indicador visual de progresso
+    steps = [
+        ("1️⃣", "Filtrar Emails", 1),
+        ("2️⃣", "Selecionar Emails", 2),
+        ("3️⃣", "Validar Publicações", 3),
+        ("4️⃣", "Gerar Tarefas", 4)
+    ]
+    
+    for icon, name, step_num in steps:
+        if st.session_state.current_step == step_num:
+            st.markdown(f"**{icon} {name}** ✓")
+        elif st.session_state.current_step > step_num:
+            st.markdown(f"~~{icon} {name}~~ ✅")
+        else:
+            st.markdown(f"{icon} {name}")
+    
+    st.markdown("---")
+    
+    # Status do Gmail
+    st.header("📊 Status")
+    gmail_connected = os.path.exists('token.pickle')
+    st.metric("Gmail", "✅ Conectado" if gmail_connected else "❌ Desconectado")
+    
+    if not gmail_connected:
+        st.warning("⚠️ Execute autenticação do Gmail primeiro")
+    
+    st.markdown("---")
+    
+    # Botões de navegação
+    st.header("🎮 Controles")
+    
+    if st.button("🔄 Reiniciar Processo", use_container_width=True):
+        st.session_state.current_step = 1
+        st.session_state.filtered_emails = []
+        st.session_state.selected_email_ids = []
+        st.session_state.extracted_publications = []
+        st.session_state.selected_publication_ids = []
+        st.rerun()
+
+st.markdown("---")
+
+# =============================================================================
+# ETAPA 1: FILTRAR EMAILS
+# =============================================================================
+
+if st.session_state.current_step == 1:
+    st.header("1️⃣ Filtrar Emails da Caixa de Entrada")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.subheader("🔍 Texto")
+        text_search = st.text_input(
+            "Buscar no assunto ou corpo",
+            value=st.session_state.filters.get('text_search', ''),
+            placeholder="Ex: intimação, publicação, processo"
+        )
+    
+    with col2:
+        st.subheader("📅 Data de Recebimento")
+        date_from = st.date_input(
+            "De:",
+            value=st.session_state.filters.get('date_from')
+        )
+        date_to = st.date_input(
+            "Até:",
+            value=st.session_state.filters.get('date_to')
+        )
+    
+    with col3:
+        st.subheader("📬 Status")
+        read_status = st.radio(
+            "Mostrar emails:",
+            options=['unread', 'read', 'all'],
+            format_func=lambda x: {
+                'unread': '📭 Não lidos',
+                'read': '📬 Lidos',
+                'all': '📧 Todos'
+            }[x],
+            index=['unread', 'read', 'all'].index(st.session_state.filters.get('read_status', 'unread'))
+        )
+    
+    st.markdown("---")
+    
+    # Botão Aplicar Filtros
+    col1, col2, col3 = st.columns([2, 1, 2])
+    with col2:
+        if st.button("🔍 APLICAR FILTROS", use_container_width=True, type="primary"):
+            # Atualiza filtros
+            st.session_state.filters = {
+                'text_search': text_search,
+                'date_from': date_from.strftime('%Y/%m/%d') if date_from else None,
+                'date_to': date_to.strftime('%Y/%m/%d') if date_to else None,
+                'read_status': read_status
+            }
+            
+            # Busca emails
+            with st.spinner("Buscando emails..."):
+                gmail_service = get_gmail_service()
+                if gmail_service:
+                    emails = search_emails(gmail_service, st.session_state.filters)
+                    st.session_state.filtered_emails = emails
+                    
+                    if emails:
+                        st.success(f"✅ {len(emails)} emails encontrados!")
+                        time.sleep(1)
+                        st.session_state.current_step = 2
+                        st.rerun()
+                    else:
+                        st.warning("Nenhum email encontrado com esses filtros.")
+                else:
+                    st.error("❌ Erro ao conectar com Gmail. Verifique a autenticação.")
+
+# =============================================================================
+# ETAPA 2: SELECIONAR EMAILS
+# =============================================================================
+
+elif st.session_state.current_step == 2:
+    st.header("2️⃣ Selecionar Emails para Processar")
+    
+    st.info(f"📊 Total de emails encontrados: **{len(st.session_state.filtered_emails)}**")
+    
+    # Exibir filtros aplicados
+    with st.expander("🔍 Filtros Aplicados"):
+        filters = st.session_state.filters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.write("**Texto:**", filters.get('text_search') or "Nenhum")
+        with col2:
+            st.write("**Período:**", f"{filters.get('date_from') or 'Início'} até {filters.get('date_to') or 'Hoje'}")
+        with col3:
+            st.write("**Status:**", {
+                'unread': 'Não lidos',
+                'read': 'Lidos',
+                'all': 'Todos'
+            }.get(filters.get('read_status'), 'Não lidos'))
+    
+    st.markdown("---")
+    
+    # Lista de emails com preview
+    for idx, email in enumerate(st.session_state.filtered_emails):
+        with st.expander(
+            f"{'✉️' if not email['is_read'] else '📬'} **{email['subject'][:80]}...** - {email['sender'][:50]}",
+            expanded=False
+        ):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**De:** {email['sender']}")
+                st.markdown(f"**Data:** {email['date']}")
+                st.markdown(f"**Status:** {'Não lido' if not email['is_read'] else 'Lido'}")
+                st.markdown("**Conteúdo:**")
+                
+                # Mostrar preview do corpo (primeiros 500 caracteres)
+                body_preview = email['body'][:500] + "..." if len(email['body']) > 500 else email['body']
+                st.text_area(
+                    "Corpo do email",
+                    value=body_preview,
+                    height=200,
+                    key=f"body_{email['id']}",
+                    disabled=True
+                )
+                
+            with col2:
+                # Checkbox para seleção
+                is_selected = st.checkbox(
+                    "Selecionar",
+                    value=email['id'] in st.session_state.selected_email_ids,
+                    key=f"select_{email['id']}"
+                )
+                
+                if is_selected and email['id'] not in st.session_state.selected_email_ids:
+                    st.session_state.selected_email_ids.append(email['id'])
+                elif not is_selected and email['id'] in st.session_state.selected_email_ids:
+                    st.session_state.selected_email_ids.remove(email['id'])
+    
+    st.markdown("---")
+    
+    # Botões de navegação
+    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+    
+    with col2:
+        if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
+            st.session_state.current_step = 1
+            st.rerun()
+    
+    with col3:
+        selected_count = len(st.session_state.selected_email_ids)
+        if st.button(
+            f"📤 EXTRAIR PUBLICAÇÕES ({selected_count} selecionados)",
+            use_container_width=True,
+            type="primary",
+            disabled=selected_count == 0
+        ):
+            with st.spinner("Extraindo publicações..."):
+                publications = []
+                
+                for email in st.session_state.filtered_emails:
+                    if email['id'] in st.session_state.selected_email_ids:
+                        # Extrai publicações deste email
+                        email_pubs = extract_publications_from_email(email['body'], email['subject'])
+                        
+                        # Adiciona metadados
+                        for pub in email_pubs:
+                            pub['email_id'] = email['id']
+                            pub['email_subject'] = email['subject']
+                            pub['email_sender'] = email['sender']
+                            pub['email_date'] = email['date']
+                            pub['pub_id'] = f"{email['id']}_{len(publications)}"
+                            publications.append(pub)
+                
+                st.session_state.extracted_publications = publications
+                
+                if publications:
+                    st.success(f"✅ {len(publications)} publicações extraídas de {selected_count} emails!")
+                    time.sleep(1)
+                    st.session_state.current_step = 3
+                    st.rerun()
+                else:
+                    st.warning("Nenhuma publicação encontrada nos emails selecionados.")
+
+# =============================================================================
+# ETAPA 3: VALIDAR PUBLICAÇÕES
+# =============================================================================
+
+elif st.session_state.current_step == 3:
+    st.header("3️⃣ Validar e Selecionar Publicações")
+    
+    total_pubs = len(st.session_state.extracted_publications)
+    st.info(f"📋 Total de publicações extraídas: **{total_pubs}**")
+    
+    st.markdown("---")
+    
+    # Exibir publicações
+    for idx, pub in enumerate(st.session_state.extracted_publications):
+        with st.expander(
+            f"📄 **Processo: {pub['process_number']}** - Email: {pub['email_subject'][:60]}...",
+            expanded=False
+        ):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**Número do Processo:** {pub['process_number']}")
+                st.markdown(f"**Email de Origem:** {pub['email_subject']}")
+                st.markdown(f"**Remetente:** {pub['email_sender']}")
+                st.markdown(f"**Data:** {pub['email_date']}")
+                
+                st.markdown("---")
+                st.markdown("**Conteúdo da Publicação:**")
+                
+                # Mostrar conteúdo completo
+                st.text_area(
+                    "Texto da publicação",
+                    value=pub['content'],
+                    height=300,
+                    key=f"pub_content_{pub['pub_id']}",
+                    disabled=True
+                )
+            
+            with col2:
+                # Checkbox para seleção
+                is_selected = st.checkbox(
+                    "Selecionar para gerar tarefa",
+                    value=pub['pub_id'] in st.session_state.selected_publication_ids,
+                    key=f"select_pub_{pub['pub_id']}"
+                )
+                
+                if is_selected and pub['pub_id'] not in st.session_state.selected_publication_ids:
+                    st.session_state.selected_publication_ids.append(pub['pub_id'])
+                elif not is_selected and pub['pub_id'] in st.session_state.selected_publication_ids:
+                    st.session_state.selected_publication_ids.remove(pub['pub_id'])
+    
+    st.markdown("---")
+    
+    # Botões de navegação
+    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+    
+    with col2:
+        if st.button("⬅️ Voltar aos Emails", use_container_width=True):
+            st.session_state.current_step = 2
+            st.rerun()
+    
+    with col3:
+        selected_count = len(st.session_state.selected_publication_ids)
+        if st.button(
+            f"✅ GERAR TAREFAS ({selected_count} selecionadas)",
+            use_container_width=True,
+            type="primary",
+            disabled=selected_count == 0
+        ):
+            st.session_state.current_step = 4
+            st.rerun()
+
+# =============================================================================
+# ETAPA 4: GERAR TAREFAS
+# =============================================================================
+
+elif st.session_state.current_step == 4:
+    st.header("4️⃣ Gerar Tarefas no MeisterTask")
+    
+    selected_pubs = [
+        pub for pub in st.session_state.extracted_publications
+        if pub['pub_id'] in st.session_state.selected_publication_ids
+    ]
+    
+    st.info(f"🎯 **{len(selected_pubs)}** publicações selecionadas para criar tarefas")
+    
+    st.markdown("---")
+    
+    # Preview das tarefas que serão criadas
+    st.subheader("📋 Preview das Tarefas:")
+    
+    for idx, pub in enumerate(selected_pubs, 1):
+        with st.expander(f"{idx}. {pub['process_number']}", expanded=False):
+            # Extrai informações da publicação
+            parties = extract_parties_from_publication(pub['content'])
+            task_title = f"{pub['process_number']} - {parties}"
+            
+            st.markdown(f"**Título da Tarefa:**")
+            st.code(task_title)
+            
+            st.markdown(f"**Partes:** {parties}")
+            st.markdown(f"**Email de Origem:** {pub['email_subject']}")
+            
+            # Preview do conteúdo (primeiros 500 caracteres)
+            content_preview = pub['content'][:500] + "..." if len(pub['content']) > 500 else pub['content']
+            st.text_area(
+                "Preview do Conteúdo (Descrição da Tarefa):",
+                value=content_preview,
+                height=150,
+                disabled=True,
+                key=f"preview_{idx}"
+            )
+    
+    st.markdown("---")
+    
+    # Informações de destino
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"📁 **Projeto:** Edson Pratti Advogados")
+    with col2:
+        st.info(f"📌 **Seção:** Publicações")
+    
+    st.markdown("---")
+    
+    # Botões de ação
+    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+    
+    with col2:
+        if st.button("⬅️ Voltar às Publicações", use_container_width=True):
+            st.session_state.current_step = 3
+            st.rerun()
+    
+    with col3:
+        if st.button(
+            f"🚀 CRIAR {len(selected_pubs)} TAREFAS",
+            use_container_width=True,
+            type="primary"
+        ):
+            # Carrega configurações do .env
+            api_token = load_env_var('MEISTERTASK_API_TOKEN')
+            section_id = load_env_var('MEISTERTASK_SECTION_ID')
+            
+            # Debug: mostra configurações (parcialmente)
+            st.info(f"🔑 API Token: {'✅ Configurado' if api_token else '❌ Não encontrado'}")
+            st.info(f"📌 Section ID: {section_id if section_id else '❌ Não encontrado'}")
+            
+            if not api_token or not section_id:
+                st.error("❌ Erro: MEISTERTASK_API_TOKEN ou MEISTERTASK_SECTION_ID não configurados no arquivo .env")
+                st.stop()
+            
+            # Container para resultados que não desaparecem
+            results_container = st.container()
+            
+            # Barra de progresso
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            success_count = 0
+            error_count = 0
+            errors = []
+            success_tasks = []
+            
+            for idx, pub in enumerate(selected_pubs):
+                # Atualiza progresso
+                progress = (idx + 1) / len(selected_pubs)
+                progress_bar.progress(progress)
+                status_text.text(f"Criando tarefa {idx + 1} de {len(selected_pubs)}: {pub['process_number']}")
+                
+                # Extrai informações
+                parties = extract_parties_from_publication(pub['content'])
+                
+                # Cria tarefa no MeisterTask
+                success, result = create_meistertask_task(
+                    process_number=pub['process_number'],
+                    parties=parties,
+                    description=pub['content'],
+                    section_id=section_id,
+                    api_token=api_token
+                )
+                
+                if success:
+                    success_count += 1
+                    success_tasks.append(pub['process_number'])
+                else:
+                    error_count += 1
+                    error_msg = f"{pub['process_number']}: {result}"
+                    errors.append(error_msg)
+                
+                time.sleep(0.5)  # Evita rate limiting
+            
+            # Limpa barra de progresso
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Salva resultados no session state para não desaparecerem
+            st.session_state.task_creation_results = {
+                'success_count': success_count,
+                'error_count': error_count,
+                'errors': errors,
+                'success_tasks': success_tasks
+            }
+    
+    # Mostra resultados salvos (persistem na tela)
+    if st.session_state.task_creation_results:
+        results = st.session_state.task_creation_results
+        
+        st.markdown("---")
+        st.subheader("📊 Resultado da Criação de Tarefas:")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(f"✅ **{results['success_count']}** tarefas criadas com sucesso!")
+            if results['success_tasks']:
+                with st.expander("Ver tarefas criadas"):
+                    for task in results['success_tasks']:
+                        st.text(f"✓ {task}")
+        
+        with col2:
+            if results['error_count'] > 0:
+                st.error(f"❌ **{results['error_count']}** erros")
+                with st.expander("⚠️ VER DETALHES DOS ERROS (CLIQUE AQUI)", expanded=True):
+                    for error in results['errors']:
+                        st.code(error, language=None)
+        
+        # Botões de navegação após conclusão
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("🏠 Voltar ao Início e Limpar", use_container_width=True, type="primary"):
+                st.session_state.current_step = 1
+                st.session_state.selected_email_ids = []
+                st.session_state.extracted_publications = []
+                st.session_state.selected_publication_ids = []
+                st.session_state.task_creation_results = None
+                st.rerun()
+            st.rerun()
+    
+    with col3:
+        if st.button("🚀 CRIAR TAREFAS", use_container_width=True, type="primary"):
+            st.success("🎉 Funcionalidade em desenvolvimento!")
+            st.info("""
+            Aqui o sistema irá:
+            1. Processar cada publicação com IA (se habilitado)
+            2. Criar tarefas no MeisterTask
+            3. Marcar emails como lidos (se habilitado)
+            4. Adicionar labels (se habilitado)
+            5. Exibir relatório de conclusão
+            """)
+            
+            # TODO: Implementar criação de tarefas
+            # - Conectar com MeisterTask API
+            # - Usar OpenAI para extrair informações
+            # - Criar tarefas com os dados extraídos
+            # - Atualizar status dos emails no Gmail
+
+# Footer
+st.markdown("---")
+st.caption("📧 Sistema de Automação Gmail → MeisterTask | Desenvolvido com Streamlit")
