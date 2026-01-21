@@ -9,7 +9,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import pickle
 from google.auth.transport.requests import Request
@@ -86,7 +86,7 @@ def get_gmail_service():
             if not os.path.exists('credentials.json'):
                 return None
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=8080)
         
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
@@ -429,11 +429,11 @@ if st.session_state.current_step == 1:
         st.subheader("📅 Data de Recebimento")
         date_from = st.date_input(
             "De:",
-            value=st.session_state.filters.get('date_from')
+            value=st.session_state.filters.get('date_from') or (datetime.now() - timedelta(days=7)).date()
         )
         date_to = st.date_input(
             "Até:",
-            value=st.session_state.filters.get('date_to')
+            value=st.session_state.filters.get('date_to') or datetime.now().date()
         )
     
     with col3:
@@ -548,6 +548,11 @@ elif st.session_state.current_step == 2:
     # Botões de navegação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step2", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
         if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
             st.session_state.current_step = 1
@@ -644,6 +649,11 @@ elif st.session_state.current_step == 3:
     # Botões de navegação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step3", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
         if st.button("⬅️ Voltar aos Emails", use_container_width=True):
             st.session_state.current_step = 2
@@ -715,11 +725,16 @@ elif st.session_state.current_step == 4:
     # Botões de ação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step4", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
-        if st.button("⬅️ Voltar às Publicações", use_container_width=True):
+        btn_voltar = st.button("⬅️ Voltar às Publicações", use_container_width=True, key="btn_back_to_pubs")
+        if btn_voltar:
             st.session_state.current_step = 3
             st.rerun()
-    
     with col3:
         if st.button(
             f"🚀 CRIAR {len(selected_pubs)} TAREFAS",
