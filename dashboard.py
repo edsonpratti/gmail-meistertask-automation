@@ -71,6 +71,12 @@ if 'task_creation_results' not in st.session_state:
 if 'tasks_to_delete' not in st.session_state:
     st.session_state.tasks_to_delete = []
 
+if 'found_tasks' not in st.session_state:
+    st.session_state.found_tasks = None
+
+if 'found_duplicates' not in st.session_state:
+    st.session_state.found_duplicates = None
+
 if 'filters' not in st.session_state:
     st.session_state.filters = {
         'text_search': '',
@@ -428,9 +434,68 @@ def create_meistertask_task(process_number, parties, description, section_id, ap
 
 def list_meistertask_tasks(section_id, api_token):
     """
-    Lista todas as tarefas de uma seção do MeisterTask
+    Lista TODAS as tarefas de uma seção do MeisterTask (com paginação)
+    A API retorna no máximo 50 tarefas por página, então precisamos fazer múltiplas requisições
     """
-    url = f"https://www.meistertask.com/api/sections/{section_id}/tasks"
+    all_tasks = []
+    page = 1
+    
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        while True:
+            # MeisterTask usa offset/limit ao invés de page/per_page
+            offset = (page - 1) * 50
+            url = f"https://www.meistertask.com/api/sections/{section_id}/tasks"
+            
+            # Tenta com parâmetros de paginação
+            params = {"limit": 100, "offset": offset}
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                tasks = response.json()
+                
+                # Debug: mostra quantas tarefas vieram nesta página
+                st.info(f"📄 Página {page}: {len(tasks)} tarefas recuperadas (offset: {offset})")
+                
+                # Se não retornou tarefas, chegamos ao fim
+                if not tasks or len(tasks) == 0:
+                    break
+                
+                all_tasks.extend(tasks)
+                
+                # Se retornou menos que 50, é a última página
+                if len(tasks) < 50:
+                    break
+                
+                # Vai para próxima página
+                page += 1
+                
+                # Proteção contra loop infinito
+                if page > 20:  # Máximo 1000 tarefas (20 páginas x 50)
+                    st.warning("⚠️ Limite de páginas atingido. Se houver mais tarefas, elas não foram carregadas.")
+                    break
+                
+            else:
+                error_detail = f"Status {response.status_code}: {response.text}"
+                return False, error_detail
+        
+        st.success(f"✅ Total de tarefas carregadas: {len(all_tasks)} (de {page} página(s))")
+        return True, all_tasks
+            
+    except requests.exceptions.RequestException as e:
+        return False, f"Erro de conexão: {str(e)}"
+
+
+def get_meistertask_task(task_id, api_token):
+    """
+    Busca informações de uma tarefa específica do MeisterTask
+    """
+    url = f"https://www.meistertask.com/api/tasks/{task_id}"
     
     headers = {
         "Authorization": f"Bearer {api_token}",
@@ -443,8 +508,7 @@ def list_meistertask_tasks(section_id, api_token):
         if response.status_code == 200:
             return True, response.json()
         else:
-            error_detail = f"Status {response.status_code}: {response.text}"
-            return False, error_detail
+            return False, f"Status {response.status_code}"
             
     except requests.exceptions.RequestException as e:
         return False, f"Erro de conexão: {str(e)}"
@@ -452,8 +516,14 @@ def list_meistertask_tasks(section_id, api_token):
 
 def delete_meistertask_task(task_id, api_token):
     """
-    Exclui uma tarefa do MeisterTask
+    Move uma tarefa do MeisterTask para a lixeira (trash)
+    A API do MeisterTask usa PUT com status=18 para enviar tarefas para a lixeira
     """
+    # Primeiro verifica se a tarefa existe
+    success, task_data = get_meistertask_task(task_id, api_token)
+    if not success:
+        return False, f"Não foi possível verificar a tarefa antes de deletar: {task_data}"
+    
     url = f"https://www.meistertask.com/api/tasks/{task_id}"
     
     headers = {
@@ -462,14 +532,29 @@ def delete_meistertask_task(task_id, api_token):
     }
     
     try:
-        response = requests.delete(url, headers=headers, timeout=30)
+        # Tenta mover para lixeira (trash) usando status=18
+        trash_data = {"status": 18}
+        response = requests.put(url, headers=headers, json=trash_data, timeout=30)
         
-        # MeisterTask retorna 204 (No Content) para sucesso na exclusão
         if response.status_code in [200, 204]:
-            return True, "Tarefa excluída com sucesso"
+            # Verifica a resposta para debug
+            if response.status_code == 200:
+                result = response.json()
+                new_status = result.get('status', 'unknown')
+                return True, f"Tarefa movida para lixeira (novo status: {new_status})"
+            return True, "Tarefa movida para lixeira com sucesso"
+        elif response.status_code == 400:
+            # Se status=18 não funcionar, tenta outros valores conhecidos
+            # Status 2 = Completa, pode precisar disso antes
+            error_msg = response.text[:200] if len(response.text) > 200 else response.text
+            return False, f"Não foi possível mover para lixeira. Resposta da API: {error_msg}"
+        elif response.status_code == 403:
+            return False, "Sem permissão para deletar esta tarefa"
+        elif response.status_code == 404:
+            return False, "Tarefa não encontrada"
         else:
-            error_detail = f"Status {response.status_code}: {response.text}"
-            return False, error_detail
+            error_msg = response.text[:300] if len(response.text) > 300 else response.text
+            return False, f"Erro ao deletar (status {response.status_code}): {error_msg}"
             
     except requests.exceptions.RequestException as e:
         return False, f"Erro de conexão: {str(e)}"
@@ -479,34 +564,76 @@ def extract_process_number(task_name):
     """
     Extrai o número do processo do nome da tarefa.
     Formato esperado: "XXXXXXX-XX.XXXX.X.XX.XXXX - Nome das Partes"
+    Aceita variações com 1 ou 2 dígitos no segmento do meio
     """
     import re
-    # Padrão para número de processo brasileiro
-    pattern = r'(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})'
+    # Padrão mais flexível para número de processo brasileiro
+    # Aceita: NNNNNNN-DD.AAAA.J.TT.OOOO onde J pode ser 1 ou 2 dígitos
+    pattern = r'(\d{7}-\d{2}\.\d{4}\.\d{1,2}\.\d{2}\.\d{4})'
     match = re.search(pattern, task_name)
     if match:
         return match.group(1)
     return None
 
 
-def find_duplicate_tasks(tasks):
+def find_duplicate_tasks(tasks, only_unassigned=True):
     """
     Identifica tarefas duplicadas baseadas no número do processo
     Retorna um dicionário: {numero_processo: [lista de tarefas]}
-    """
-    process_dict = {}
     
-    for task in tasks:
+    Args:
+        tasks: Lista de tarefas do MeisterTask
+        only_unassigned: Se True, considera apenas tarefas sem responsável designado
+    """
+    # Primeiro, filtra tarefas sem responsável se solicitado
+    if only_unassigned:
+        filtered_tasks = [task for task in tasks if not task.get('assigned_to_id')]
+        st.info(f"🔍 Filtro aplicado: {len(filtered_tasks)} tarefas sem responsável (de {len(tasks)} totais)")
+    else:
+        filtered_tasks = tasks
+    
+    process_dict = {}
+    seen_task_ids = set()
+    tasks_without_process = []  # Tarefas sem número de processo válido
+    
+    for task in filtered_tasks:
+        task_id = task.get('id')
         task_name = task.get('name', '')
+        
+        # Pula se já vimos esta tarefa
+        if task_id in seen_task_ids:
+            continue
+        
         process_number = extract_process_number(task_name)
         
+        # Só agrupa tarefas que TÊM número de processo válido
         if process_number:
             if process_number not in process_dict:
                 process_dict[process_number] = []
+            
             process_dict[process_number].append(task)
+            seen_task_ids.add(task_id)
+        else:
+            # Tarefa sem número de processo - não agrupa
+            tasks_without_process.append(task_name[:80])
     
-    # Filtra apenas processos com duplicatas
+    # Filtra APENAS processos que têm MAIS DE UMA tarefa
     duplicates = {k: v for k, v in process_dict.items() if len(v) > 1}
+    
+    # Debug detalhado
+    st.info(f"📊 Estatísticas:")
+    st.write(f"- Total de tarefas analisadas: **{len(filtered_tasks)}**")
+    st.write(f"- Tarefas com número de processo válido: **{len(seen_task_ids)}**")
+    st.write(f"- Tarefas sem número de processo: **{len(tasks_without_process)}**")
+    st.write(f"- Processos únicos encontrados: **{len(process_dict)}**")
+    st.write(f"- Processos com duplicatas (2+ tarefas): **{len(duplicates)}**")
+    
+    if tasks_without_process:
+        with st.expander("⚠️ Ver tarefas sem número de processo (não serão processadas)"):
+            for t in tasks_without_process[:10]:  # Mostra primeiras 10
+                st.text(f"- {t}")
+            if len(tasks_without_process) > 10:
+                st.text(f"... e mais {len(tasks_without_process) - 10} tarefas")
     
     return duplicates
 
@@ -1132,138 +1259,151 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
                     tasks = result
                     st.success(f"✅ {len(tasks)} tarefas encontradas!")
                     
+                    # Armazenar no session_state
+                    st.session_state.found_tasks = tasks
+                    
                     # Identificar duplicatas
                     duplicates = find_duplicate_tasks(tasks)
+                    st.session_state.found_duplicates = duplicates
                     
-                    if duplicates:
-                        st.warning(f"⚠️ Encontradas {len(duplicates)} processos com tarefas duplicadas!")
-                        
-                        # Mostrar duplicatas
-                        st.markdown("---")
-                        st.subheader("📋 Tarefas Duplicadas Encontradas")
-                        st.info("✓ Marque as tarefas que deseja **MANTER** (as desmarcadas serão excluídas)")
-                        
-                        # Lista para armazenar IDs das tarefas a manter
-                        tasks_to_keep = []
-                        
-                        for process_num, task_list in duplicates.items():
-                            with st.expander(f"📂 Processo: **{process_num}** ({len(task_list)} duplicatas)", expanded=True):
-                                st.markdown(f"**Encontradas {len(task_list)} tarefas para o mesmo processo:**")
-                                
-                                # Mostrar cada tarefa duplicada
-                                for idx, task in enumerate(task_list, 1):
-                                    task_id = task.get('id')
-                                    task_name = task.get('name', 'Sem nome')
-                                    task_created = task.get('created_at', 'Data desconhecida')
-                                    task_status = task.get('status', 'Sem status')
-                                    
-                                    # Cria uma coluna para checkbox e informações
-                                    col_check, col_info = st.columns([1, 9])
-                                    
-                                    with col_check:
-                                        # Por padrão, marca a primeira tarefa (mais antiga) para manter
-                                        keep_task = st.checkbox(
-                                            "Manter",
-                                            value=(idx == 1),  # Marca primeira por padrão
-                                            key=f"keep_{task_id}",
-                                            label_visibility="collapsed"
-                                        )
-                                        
-                                        if keep_task:
-                                            tasks_to_keep.append(task_id)
-                                    
-                                    with col_info:
-                                        st.markdown(f"""
-                                        **Tarefa {idx}:**
-                                        - 📝 **Nome:** {task_name}
-                                        - 🆔 **ID:** {task_id}
-                                        - 📅 **Criada em:** {task_created[:10] if len(task_created) > 10 else task_created}
-                                        - 📊 **Status:** {task_status}
-                                        """)
-                                
-                                st.markdown("---")
-                        
-                        # Calcular tarefas a excluir
-                        all_duplicate_ids = [task['id'] for task_list in duplicates.values() for task in task_list]
-                        tasks_to_delete = [tid for tid in all_duplicate_ids if tid not in tasks_to_keep]
-                        
-                        # Mostrar resumo
-                        st.markdown("---")
-                        st.subheader("📊 Resumo da Operação")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total de Duplicatas", len(all_duplicate_ids))
-                        with col2:
-                            st.metric("Tarefas a Manter", len(tasks_to_keep), delta=None, delta_color="off")
-                        with col3:
-                            st.metric("Tarefas a Excluir", len(tasks_to_delete), delta=f"-{len(tasks_to_delete)}", delta_color="inverse")
-                        
-                        # Botão de confirmação para excluir
-                        if tasks_to_delete:
-                            st.markdown("---")
-                            st.warning(f"⚠️ **ATENÇÃO:** Você está prestes a excluir **{len(tasks_to_delete)} tarefas**. Esta ação não pode ser desfeita!")
-                            
-                            col1, col2, col3 = st.columns([1, 2, 1])
-                            with col2:
-                                confirm_delete = st.checkbox("✅ Confirmo que quero excluir as tarefas desmarcadas", key="confirm_delete")
-                                
-                                if confirm_delete:
-                                    if st.button("🗑️ EXCLUIR TAREFAS SELECIONADAS", use_container_width=True, type="primary"):
-                                        # Executar exclusão
-                                        st.markdown("---")
-                                        st.subheader("🔄 Excluindo Tarefas...")
-                                        
-                                        progress_bar = st.progress(0)
-                                        status_text = st.empty()
-                                        
-                                        success_count = 0
-                                        error_count = 0
-                                        errors = []
-                                        
-                                        for idx, task_id in enumerate(tasks_to_delete, 1):
-                                            status_text.text(f"Excluindo tarefa {idx} de {len(tasks_to_delete)}...")
-                                            progress_bar.progress(idx / len(tasks_to_delete))
-                                            
-                                            success, message = delete_meistertask_task(task_id, api_token)
-                                            
-                                            if success:
-                                                success_count += 1
-                                            else:
-                                                error_count += 1
-                                                errors.append(f"Tarefa ID {task_id}: {message}")
-                                            
-                                            time.sleep(0.3)  # Evita rate limiting
-                                        
-                                        progress_bar.empty()
-                                        status_text.empty()
-                                        
-                                        # Mostrar resultados
-                                        st.markdown("---")
-                                        st.subheader("📊 Resultado da Exclusão")
-                                        
-                                        col1, col2 = st.columns(2)
-                                        with col1:
-                                            st.success(f"✅ **{success_count}** tarefas excluídas com sucesso!")
-                                        
-                                        with col2:
-                                            if error_count > 0:
-                                                st.error(f"❌ **{error_count}** erros")
-                                                with st.expander("Ver erros"):
-                                                    for error in errors:
-                                                        st.code(error)
-                                        
-                                        st.balloons()
-                                        st.success("🎉 Processo de limpeza concluído! Clique em 'Reiniciar Processo' para buscar novamente.")
-                        else:
-                            st.info("✅ Todas as tarefas duplicadas estão marcadas para manter. Não há nada para excluir.")
-                    
-                    else:
-                        st.success("✅ Nenhuma duplicata encontrada! Todas as tarefas têm números de processo únicos.")
-                        st.balloons()
-                
                 else:
-                    st.error(f"❌ Erro ao buscar tarefas: {result}")
+                    st.error(f"❌ Erro ao buscar tarefas: {result}") 
+    
+    # Mostrar duplicatas se existirem no session_state
+    if st.session_state.found_duplicates:
+        duplicates = st.session_state.found_duplicates
+        st.warning(f"⚠️ Encontradas {len(duplicates)} processos com tarefas duplicadas!")
+        
+        # Mostrar duplicatas
+        st.markdown("---")
+        st.subheader("📋 Tarefas Duplicadas Encontradas")
+        st.info("✓ Marque as tarefas que deseja **MANTER** (as desmarcadas serão excluídas)")
+        
+        # Lista para armazenar IDs das tarefas a manter
+        tasks_to_keep = []
+        
+        for process_idx, (process_num, task_list) in enumerate(duplicates.items()):
+            with st.expander(f"📂 Processo: **{process_num}** ({len(task_list)} duplicatas)", expanded=True):
+                st.warning(f"⚠️ **ATENÇÃO**: Revise cuidadosamente se estas {len(task_list)} tarefas são REALMENTE duplicatas do mesmo processo!")
+                st.markdown(f"**Encontradas {len(task_list)} tarefas para o mesmo processo:**")
+                
+                # Mostrar cada tarefa duplicada
+                for idx, task in enumerate(task_list, 1):
+                    task_id = task.get('id')
+                    task_name = task.get('name', 'Sem nome')
+                    task_created = task.get('created_at', 'Data desconhecida')
+                    task_status = task.get('status', 'Sem status')
+                    
+                    # Cria uma coluna para checkbox e informações
+                    col_check, col_info = st.columns([1, 9])
+                    
+                    with col_check:
+                        # Por padrão, marca a primeira tarefa (mais antiga) para manter
+                        # Chave única: processo_idx + idx + task_id para garantir unicidade absoluta
+                        keep_task = st.checkbox(
+                            "Manter",
+                            value=(idx == 1),  # Marca primeira por padrão
+                            key=f"keep_{process_idx}_{idx}_{task_id}",
+                            label_visibility="collapsed"
+                        )
+                        
+                        if keep_task:
+                            tasks_to_keep.append(task_id)
+                    
+                    with col_info:
+                        st.markdown(f"""
+                        **Tarefa {idx}:**
+                        - 📝 **Nome COMPLETO:** `{task_name}`
+                        - 🆔 **ID:** {task_id}
+                        - 📅 **Criada em:** {task_created[:10] if len(task_created) > 10 else task_created}
+                        - 📊 **Status:** {task_status}
+                        """)
+                
+                st.markdown("---")
+        
+        # Calcular tarefas a excluir
+        all_duplicate_ids = [task['id'] for task_list in duplicates.values() for task in task_list]
+        tasks_to_delete = [tid for tid in all_duplicate_ids if tid not in tasks_to_keep]
+        
+        # Mostrar resumo
+        st.markdown("---")
+        st.subheader("📊 Resumo da Operação")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total de Duplicatas", len(all_duplicate_ids))
+        with col2:
+            st.metric("Tarefas a Manter", len(tasks_to_keep), delta=None, delta_color="off")
+        with col3:
+            st.metric("Tarefas a Excluir", len(tasks_to_delete), delta=f"-{len(tasks_to_delete)}", delta_color="inverse")
+        
+        # Botão de confirmação para excluir
+        if tasks_to_delete:
+            st.markdown("---")
+            st.warning(f"⚠️ **ATENÇÃO:** Você está prestes a excluir **{len(tasks_to_delete)} tarefas**. Esta ação não pode ser desfeita!")
+            
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                confirm_delete = st.checkbox("✅ Confirmo que quero excluir as tarefas desmarcadas", key="confirm_delete")
+                
+                if confirm_delete:
+                    if st.button("🗑️ EXCLUIR TAREFAS SELECIONADAS", use_container_width=True, type="primary"):
+                        # Executar exclusão
+                        st.markdown("---")
+                        st.subheader("🔄 Excluindo Tarefas...")
+                        
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        success_count = 0
+                        error_count = 0
+                        errors = []
+                        
+                        for idx, task_id in enumerate(tasks_to_delete, 1):
+                            status_text.text(f"Excluindo tarefa {idx} de {len(tasks_to_delete)}...")
+                            progress_bar.progress(idx / len(tasks_to_delete))
+                            
+                            success, message = delete_meistertask_task(task_id, api_token)
+                            
+                            if success:
+                                success_count += 1
+                            else:
+                                error_count += 1
+                                errors.append(f"Tarefa ID {task_id}: {message}")
+                            
+                            time.sleep(0.3)  # Evita rate limiting
+                        
+                        progress_bar.empty()
+                        status_text.empty()
+                        
+                        # Mostrar resultados
+                        st.markdown("---")
+                        st.subheader("📊 Resultado da Exclusão")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.success(f"✅ **{success_count}** tarefas excluídas com sucesso!")
+                        
+                        with col2:
+                            if error_count > 0:
+                                st.error(f"❌ **{error_count}** erros")
+                                with st.expander("Ver erros"):
+                                    for error in errors:
+                                        st.code(error)
+                        
+                        st.balloons()
+                        st.success("🎉 Processo de limpeza concluído! Clique em 'Reiniciar Processo' para buscar novamente.")
+                        
+                        # Limpar estado após exclusão
+                        st.session_state.found_duplicates = None
+                        st.session_state.found_tasks = None
+        else:
+            st.info("✅ Todas as tarefas duplicadas estão marcadas para manter. Não há nada para excluir.")
+    
+    elif st.session_state.found_tasks is not None:
+        # Buscou tarefas mas não encontrou duplicatas
+        st.success("✅ Nenhuma duplicata encontrada! Todas as tarefas têm números de processo únicos.")
+        st.balloons()
 
 # Footer
 st.markdown("---")
