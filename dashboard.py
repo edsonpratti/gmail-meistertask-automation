@@ -297,6 +297,20 @@ def extract_parties_from_publication(pub_content):
         r'AUTOR:\s*([^\n]+).*?R[ÉE]U:\s*([^\n]+)',
         # Partes: NOME vs NOME
         r'Partes:\s*([^\n]+?)\s+vs\s+([^\n]+)',
+        # APELANTE: NOME vs APELADO: NOME
+        r'APELANTE:\s*([^\n]+).*?APELADO:\s*([^\n]+)',
+        # RECORRENTE: NOME vs RECORRIDO: NOME
+        r'RECORRENTE:\s*([^\n]+).*?RECORRIDO:\s*([^\n]+)',
+        # EMBARGANTE: NOME vs EMBARGADO: NOME
+        r'EMBARGANTE:\s*([^\n]+).*?EMBARGADO:\s*([^\n]+)',
+        # AGRAVANTE: NOME vs AGRAVADO: NOME
+        r'AGRAVANTE:\s*([^\n]+).*?AGRAVADO:\s*([^\n]+)',
+        # INTERESSADO
+        r'INTERESSADO:\s*([^\n]+).*?INTERESSADO:\s*([^\n]+)',
+        # IMPETRANTE vs IMPETRADO
+        r'IMPETRANTE:\s*([^\n]+).*?IMPETRADO:\s*([^\n]+)',
+        # Parte Autora vs Parte Ré
+        r'Parte\s+(?:Autora|Ativa):\s*([^\n]+).*?Parte\s+(?:R[ée]|Passiva):\s*([^\n]+)',
     ]
     
     for pattern in patterns:
