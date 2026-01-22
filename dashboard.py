@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Dashboard de Gerenciamento da Automação Gmail → MeisterTask
-Sistema com validação manual em múltiplas etapas
+Sistema com validação manual em múltiplas etapas e gerenciamento de duplicatas
 """
 import streamlit as st
 import json
@@ -47,6 +47,12 @@ def load_env_var(key, default=''):
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1  # 1=Filtros, 2=Emails, 3=Publicações, 4=Tarefas
 
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = 'criar_tarefas'  # 'criar_tarefas' ou 'gerenciar_duplicatas'
+
+if 'data_source' not in st.session_state:
+    st.session_state.data_source = 'gmail'  # 'gmail' ou 'djne'
+
 if 'filtered_emails' not in st.session_state:
     st.session_state.filtered_emails = []
 
@@ -62,6 +68,9 @@ if 'selected_publication_ids' not in st.session_state:
 if 'task_creation_results' not in st.session_state:
     st.session_state.task_creation_results = None
 
+if 'tasks_to_delete' not in st.session_state:
+    st.session_state.tasks_to_delete = []
+
 if 'filters' not in st.session_state:
     st.session_state.filters = {
         'text_search': '',
@@ -72,6 +81,15 @@ if 'filters' not in st.session_state:
 
 if 'fonte_dados' not in st.session_state:
     st.session_state.fonte_dados = 'Gmail'  # Gmail ou DJNE
+
+# Validação de consistência do estado
+# Se está em etapas avançadas mas não tem dados, volta para o início
+if st.session_state.current_step > 1 and not st.session_state.filtered_emails:
+    st.session_state.current_step = 1
+if st.session_state.current_step > 2 and not st.session_state.selected_email_ids:
+    st.session_state.current_step = 1
+if st.session_state.current_step > 3 and not st.session_state.extracted_publications:
+    st.session_state.current_step = 1
 
 # Função para conectar ao Gmail
 def get_gmail_service():
@@ -295,8 +313,6 @@ def extract_parties_from_publication(pub_content):
         r'EXEQUENTE:\s*([^\n]+).*?EXECUTADO:\s*([^\n]+)',
         # AUTOR: NOME vs RÉU: NOME
         r'AUTOR:\s*([^\n]+).*?R[ÉE]U:\s*([^\n]+)',
-        # Partes: NOME vs NOME
-        r'Partes:\s*([^\n]+?)\s+vs\s+([^\n]+)',
         # APELANTE: NOME vs APELADO: NOME
         r'APELANTE:\s*([^\n]+).*?APELADO:\s*([^\n]+)',
         # RECORRENTE: NOME vs RECORRIDO: NOME
@@ -305,11 +321,15 @@ def extract_parties_from_publication(pub_content):
         r'EMBARGANTE:\s*([^\n]+).*?EMBARGADO:\s*([^\n]+)',
         # AGRAVANTE: NOME vs AGRAVADO: NOME
         r'AGRAVANTE:\s*([^\n]+).*?AGRAVADO:\s*([^\n]+)',
-        # INTERESSADO
+        # INTERESSADO: NOME vs INTERESSADO: NOME (segunda parte)
         r'INTERESSADO:\s*([^\n]+).*?INTERESSADO:\s*([^\n]+)',
-        # IMPETRANTE vs IMPETRADO
+        # IMPETRADO vs IMPETRANTE
         r'IMPETRANTE:\s*([^\n]+).*?IMPETRADO:\s*([^\n]+)',
-        # Parte Autora vs Parte Ré
+        # CONSULENTE: NOME vs CONSULADO: NOME
+        r'CONSULENTE:\s*([^\n]+).*?CONSULADO:\s*([^\n]+)',
+        # Partes: NOME vs NOME
+        r'Partes:\s*([^\n]+?)\s+vs\s+([^\n]+)',
+        # Parte Autora vs Parte Ré (genérico)
         r'Parte\s+(?:Autora|Ativa):\s*([^\n]+).*?Parte\s+(?:R[ée]|Passiva):\s*([^\n]+)',
     ]
     
@@ -341,6 +361,29 @@ def extract_parties_from_publication(pub_content):
         if polo_ativo and polo_passivo:
             party1 = polo_ativo.group(1).strip()[:50]
             party2 = polo_passivo.group(1).strip()[:50]
+            parties = f"{party1} x {party2}"
+    
+    # Se ainda não encontrou, tenta buscar padrão genérico de qualquer parte
+    if not parties:
+        # Busca por palavras-chave de tipos de partes (captura múltiplas ocorrências)
+        parte_keywords = r'(?:INTERESSADO|APELANTE|APELADO|RECORRENTE|RECORRIDO|REQUERENTE|REQUERIDO|EXEQUENTE|EXECUTADO|AUTOR|R[ÉE]U|EMBARGANTE|EMBARGADO|AGRAVANTE|AGRAVADO|IMPETRANTE|IMPETRADO)'
+        matches = re.findall(rf'{parte_keywords}[:\s]+([^\n]+)', pub_content, re.IGNORECASE)
+        
+        if len(matches) >= 2:
+            # Pega as duas primeiras partes encontradas
+            party1 = matches[0].strip()
+            party2 = matches[1].strip()
+            
+            # Remove CPF/CNPJ e números
+            party1 = re.sub(r'\d{11,}', '', party1).strip()
+            party2 = re.sub(r'\d{11,}', '', party2).strip()
+            
+            # Limita tamanho
+            if len(party1) > 50:
+                party1 = party1[:50].strip()
+            if len(party2) > 50:
+                party2 = party2[:50].strip()
+            
             parties = f"{party1} x {party2}"
     
     return parties if parties else "Partes não identificadas"
@@ -382,6 +425,91 @@ def create_meistertask_task(process_number, parties, description, section_id, ap
     except requests.exceptions.RequestException as e:
         return False, f"Erro de conexão: {str(e)}"
 
+
+def list_meistertask_tasks(section_id, api_token):
+    """
+    Lista todas as tarefas de uma seção do MeisterTask
+    """
+    url = f"https://www.meistertask.com/api/sections/{section_id}/tasks"
+    
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            error_detail = f"Status {response.status_code}: {response.text}"
+            return False, error_detail
+            
+    except requests.exceptions.RequestException as e:
+        return False, f"Erro de conexão: {str(e)}"
+
+
+def delete_meistertask_task(task_id, api_token):
+    """
+    Exclui uma tarefa do MeisterTask
+    """
+    url = f"https://www.meistertask.com/api/tasks/{task_id}"
+    
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.delete(url, headers=headers, timeout=30)
+        
+        # MeisterTask retorna 204 (No Content) para sucesso na exclusão
+        if response.status_code in [200, 204]:
+            return True, "Tarefa excluída com sucesso"
+        else:
+            error_detail = f"Status {response.status_code}: {response.text}"
+            return False, error_detail
+            
+    except requests.exceptions.RequestException as e:
+        return False, f"Erro de conexão: {str(e)}"
+
+
+def extract_process_number(task_name):
+    """
+    Extrai o número do processo do nome da tarefa.
+    Formato esperado: "XXXXXXX-XX.XXXX.X.XX.XXXX - Nome das Partes"
+    """
+    import re
+    # Padrão para número de processo brasileiro
+    pattern = r'(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})'
+    match = re.search(pattern, task_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def find_duplicate_tasks(tasks):
+    """
+    Identifica tarefas duplicadas baseadas no número do processo
+    Retorna um dicionário: {numero_processo: [lista de tarefas]}
+    """
+    process_dict = {}
+    
+    for task in tasks:
+        task_name = task.get('name', '')
+        process_number = extract_process_number(task_name)
+        
+        if process_number:
+            if process_number not in process_dict:
+                process_dict[process_number] = []
+            process_dict[process_number].append(task)
+    
+    # Filtra apenas processos com duplicatas
+    duplicates = {k: v for k, v in process_dict.items() if len(v) > 1}
+    
+    return duplicates
+
 # =============================================================================
 # INTERFACE PRINCIPAL
 # =============================================================================
@@ -391,25 +519,45 @@ st.markdown("**Validação Manual em Múltiplas Etapas**")
 
 # Sidebar - Navegação e Status
 with st.sidebar:
-    st.header("📍 Etapas do Processo")
+    st.header("🎯 Modo de Operação")
     
-    # Indicador visual de progresso
-    steps = [
-        ("1️⃣", "Filtrar Emails", 1),
-        ("2️⃣", "Selecionar Emails", 2),
-        ("3️⃣", "Validar Publicações", 3),
-        ("4️⃣", "Gerar Tarefas", 4)
-    ]
+    mode = st.radio(
+        "Escolha o que deseja fazer:",
+        options=['criar_tarefas', 'gerenciar_duplicatas'],
+        format_func=lambda x: '➕ Criar Novas Tarefas' if x == 'criar_tarefas' else '🔍 Gerenciar Duplicatas',
+        index=0 if st.session_state.app_mode == 'criar_tarefas' else 1,
+        key='mode_selector'
+    )
     
-    for icon, name, step_num in steps:
-        if st.session_state.current_step == step_num:
-            st.markdown(f"**{icon} {name}** ✓")
-        elif st.session_state.current_step > step_num:
-            st.markdown(f"~~{icon} {name}~~ ✅")
-        else:
-            st.markdown(f"{icon} {name}")
+    # Se mudou o modo, atualiza e reinicia
+    if mode != st.session_state.app_mode:
+        st.session_state.app_mode = mode
+        st.session_state.current_step = 1
+        st.session_state.tasks_to_delete = []
+        st.rerun()
     
     st.markdown("---")
+    
+    if st.session_state.app_mode == 'criar_tarefas':
+        st.header("📍 Etapas do Processo")
+        
+        # Indicador visual de progresso
+        steps = [
+            ("1️⃣", "Filtrar Emails", 1),
+            ("2️⃣", "Selecionar Emails", 2),
+            ("3️⃣", "Validar Publicações", 3),
+            ("4️⃣", "Gerar Tarefas", 4)
+        ]
+        
+        for icon, name, step_num in steps:
+            if st.session_state.current_step == step_num:
+                st.markdown(f"**{icon} {name}** ✓")
+            elif st.session_state.current_step > step_num:
+                st.markdown(f"~~{icon} {name}~~ ✅")
+            else:
+                st.markdown(f"{icon} {name}")
+        
+        st.markdown("---")
     
     # Status do Gmail
     st.header("📊 Status")
@@ -424,12 +572,14 @@ with st.sidebar:
     # Botões de navegação
     st.header("🎮 Controles")
     
-    if st.button("🔄 Reiniciar Processo", use_container_width=True):
+    if st.button("🔄 Reiniciar Processo", use_container_width=True, key="sidebar_reset"):
         st.session_state.current_step = 1
         st.session_state.filtered_emails = []
         st.session_state.selected_email_ids = []
         st.session_state.extracted_publications = []
         st.session_state.selected_publication_ids = []
+        st.session_state.task_creation_results = None
+        st.session_state.tasks_to_delete = []
         st.rerun()
 
 st.markdown("---")
@@ -581,7 +731,7 @@ if st.session_state.current_step == 1:
 elif st.session_state.current_step == 2:
     st.header("2️⃣ Selecionar Emails para Processar")
     
-    st.info(f"📊 Total de emails encontrados: **{len(st.session_state.filtered_emails)}**")
+    st.info(f"📊 Total encontrado: **{len(st.session_state.filtered_emails)}**")
     
     # Exibir filtros aplicados
     with st.expander("🔍 Filtros Aplicados"):
@@ -667,7 +817,7 @@ elif st.session_state.current_step == 2:
                 
                 for email in st.session_state.filtered_emails:
                     if email['id'] in st.session_state.selected_email_ids:
-                        # Extrai publicações deste email
+                        # Extrai publicações do email
                         email_pubs = extract_publications_from_email(email['body'], email['subject'])
                         
                         # Adiciona metadados
@@ -775,6 +925,12 @@ elif st.session_state.current_step == 3:
 
 elif st.session_state.current_step == 4:
     st.header("4️⃣ Gerar Tarefas no MeisterTask")
+    
+    # Aviso se não há publicações (página recarregada)
+    if not st.session_state.selected_publication_ids:
+        st.warning("⚠️ Nenhuma publicação selecionada. Você pode ter recarregado a página.")
+        st.info("Clique no botão 'Reiniciar Processo' na barra lateral para começar novamente.")
+        st.stop()
     
     selected_pubs = [
         pub for pub in st.session_state.extracted_publications
@@ -927,34 +1083,187 @@ elif st.session_state.current_step == 4:
                         st.code(error, language=None)
         
         # Botões de navegação após conclusão
+        st.markdown("---")
+        st.success("🎉 Processo concluído! Use o botão abaixo para iniciar um novo processo.")
+        
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
-            if st.button("🏠 Voltar ao Início e Limpar", use_container_width=True, type="primary"):
-                st.session_state.current_step = 1
-                st.session_state.selected_email_ids = []
-                st.session_state.extracted_publications = []
-                st.session_state.selected_publication_ids = []
-                st.session_state.task_creation_results = None
+            if st.button("🏠 VOLTAR AO INÍCIO", use_container_width=True, type="primary", key="reset_all"):
+                # Limpa todos os estados
+                for key in ['current_step', 'filtered_emails', 'selected_email_ids', 
+                           'extracted_publications', 'selected_publication_ids', 'task_creation_results']:
+                    if key in st.session_state:
+                        if key == 'current_step':
+                            st.session_state[key] = 1
+                        else:
+                            st.session_state[key] = [] if key != 'task_creation_results' else None
+                
+                st.success("✅ Sistema reiniciado!")
+                time.sleep(0.5)
                 st.rerun()
-            st.rerun()
+
+# =============================================================================
+# MODO: GERENCIAR DUPLICATAS
+# =============================================================================
+
+if st.session_state.app_mode == 'gerenciar_duplicatas':
+    st.title("🔍 Gerenciamento de Tarefas Duplicadas")
+    st.markdown("Esta ferramenta identifica e permite excluir tarefas duplicadas na seção **Publicações** do MeisterTask.")
+    st.markdown("**Critério:** Tarefas com o mesmo número de processo são consideradas duplicatas.")
     
-    with col3:
-        if st.button("🚀 CRIAR TAREFAS", use_container_width=True, type="primary"):
-            st.success("🎉 Funcionalidade em desenvolvimento!")
-            st.info("""
-            Aqui o sistema irá:
-            1. Processar cada publicação com IA (se habilitado)
-            2. Criar tarefas no MeisterTask
-            3. Marcar emails como lidos (se habilitado)
-            4. Adicionar labels (se habilitado)
-            5. Exibir relatório de conclusão
-            """)
-            
-            # TODO: Implementar criação de tarefas
-            # - Conectar com MeisterTask API
-            # - Usar OpenAI para extrair informações
-            # - Criar tarefas com os dados extraídos
-            # - Atualizar status dos emails no Gmail
+    st.markdown("---")
+    
+    # Carregar credenciais
+    api_token = load_env_var('MEISTERTASK_API_TOKEN')
+    section_id = load_env_var('MEISTERTASK_SECTION_ID')
+    
+    if not api_token or not section_id:
+        st.error("❌ Erro: MEISTERTASK_API_TOKEN ou MEISTERTASK_SECTION_ID não configurados no arquivo .env")
+        st.stop()
+    
+    # Botão para buscar tarefas
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🔄 Buscar Tarefas da Seção Publicações", use_container_width=True, type="primary"):
+            with st.spinner("🔍 Buscando tarefas..."):
+                success, result = list_meistertask_tasks(section_id, api_token)
+                
+                if success:
+                    tasks = result
+                    st.success(f"✅ {len(tasks)} tarefas encontradas!")
+                    
+                    # Identificar duplicatas
+                    duplicates = find_duplicate_tasks(tasks)
+                    
+                    if duplicates:
+                        st.warning(f"⚠️ Encontradas {len(duplicates)} processos com tarefas duplicadas!")
+                        
+                        # Mostrar duplicatas
+                        st.markdown("---")
+                        st.subheader("📋 Tarefas Duplicadas Encontradas")
+                        st.info("✓ Marque as tarefas que deseja **MANTER** (as desmarcadas serão excluídas)")
+                        
+                        # Lista para armazenar IDs das tarefas a manter
+                        tasks_to_keep = []
+                        
+                        for process_num, task_list in duplicates.items():
+                            with st.expander(f"📂 Processo: **{process_num}** ({len(task_list)} duplicatas)", expanded=True):
+                                st.markdown(f"**Encontradas {len(task_list)} tarefas para o mesmo processo:**")
+                                
+                                # Mostrar cada tarefa duplicada
+                                for idx, task in enumerate(task_list, 1):
+                                    task_id = task.get('id')
+                                    task_name = task.get('name', 'Sem nome')
+                                    task_created = task.get('created_at', 'Data desconhecida')
+                                    task_status = task.get('status', 'Sem status')
+                                    
+                                    # Cria uma coluna para checkbox e informações
+                                    col_check, col_info = st.columns([1, 9])
+                                    
+                                    with col_check:
+                                        # Por padrão, marca a primeira tarefa (mais antiga) para manter
+                                        keep_task = st.checkbox(
+                                            "Manter",
+                                            value=(idx == 1),  # Marca primeira por padrão
+                                            key=f"keep_{task_id}",
+                                            label_visibility="collapsed"
+                                        )
+                                        
+                                        if keep_task:
+                                            tasks_to_keep.append(task_id)
+                                    
+                                    with col_info:
+                                        st.markdown(f"""
+                                        **Tarefa {idx}:**
+                                        - 📝 **Nome:** {task_name}
+                                        - 🆔 **ID:** {task_id}
+                                        - 📅 **Criada em:** {task_created[:10] if len(task_created) > 10 else task_created}
+                                        - 📊 **Status:** {task_status}
+                                        """)
+                                
+                                st.markdown("---")
+                        
+                        # Calcular tarefas a excluir
+                        all_duplicate_ids = [task['id'] for task_list in duplicates.values() for task in task_list]
+                        tasks_to_delete = [tid for tid in all_duplicate_ids if tid not in tasks_to_keep]
+                        
+                        # Mostrar resumo
+                        st.markdown("---")
+                        st.subheader("📊 Resumo da Operação")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total de Duplicatas", len(all_duplicate_ids))
+                        with col2:
+                            st.metric("Tarefas a Manter", len(tasks_to_keep), delta=None, delta_color="off")
+                        with col3:
+                            st.metric("Tarefas a Excluir", len(tasks_to_delete), delta=f"-{len(tasks_to_delete)}", delta_color="inverse")
+                        
+                        # Botão de confirmação para excluir
+                        if tasks_to_delete:
+                            st.markdown("---")
+                            st.warning(f"⚠️ **ATENÇÃO:** Você está prestes a excluir **{len(tasks_to_delete)} tarefas**. Esta ação não pode ser desfeita!")
+                            
+                            col1, col2, col3 = st.columns([1, 2, 1])
+                            with col2:
+                                confirm_delete = st.checkbox("✅ Confirmo que quero excluir as tarefas desmarcadas", key="confirm_delete")
+                                
+                                if confirm_delete:
+                                    if st.button("🗑️ EXCLUIR TAREFAS SELECIONADAS", use_container_width=True, type="primary"):
+                                        # Executar exclusão
+                                        st.markdown("---")
+                                        st.subheader("🔄 Excluindo Tarefas...")
+                                        
+                                        progress_bar = st.progress(0)
+                                        status_text = st.empty()
+                                        
+                                        success_count = 0
+                                        error_count = 0
+                                        errors = []
+                                        
+                                        for idx, task_id in enumerate(tasks_to_delete, 1):
+                                            status_text.text(f"Excluindo tarefa {idx} de {len(tasks_to_delete)}...")
+                                            progress_bar.progress(idx / len(tasks_to_delete))
+                                            
+                                            success, message = delete_meistertask_task(task_id, api_token)
+                                            
+                                            if success:
+                                                success_count += 1
+                                            else:
+                                                error_count += 1
+                                                errors.append(f"Tarefa ID {task_id}: {message}")
+                                            
+                                            time.sleep(0.3)  # Evita rate limiting
+                                        
+                                        progress_bar.empty()
+                                        status_text.empty()
+                                        
+                                        # Mostrar resultados
+                                        st.markdown("---")
+                                        st.subheader("📊 Resultado da Exclusão")
+                                        
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.success(f"✅ **{success_count}** tarefas excluídas com sucesso!")
+                                        
+                                        with col2:
+                                            if error_count > 0:
+                                                st.error(f"❌ **{error_count}** erros")
+                                                with st.expander("Ver erros"):
+                                                    for error in errors:
+                                                        st.code(error)
+                                        
+                                        st.balloons()
+                                        st.success("🎉 Processo de limpeza concluído! Clique em 'Reiniciar Processo' para buscar novamente.")
+                        else:
+                            st.info("✅ Todas as tarefas duplicadas estão marcadas para manter. Não há nada para excluir.")
+                    
+                    else:
+                        st.success("✅ Nenhuma duplicata encontrada! Todas as tarefas têm números de processo únicos.")
+                        st.balloons()
+                
+                else:
+                    st.error(f"❌ Erro ao buscar tarefas: {result}")
 
 # Footer
 st.markdown("---")
