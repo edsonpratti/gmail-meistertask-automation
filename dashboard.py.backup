@@ -9,7 +9,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import pickle
 from google.auth.transport.requests import Request
@@ -21,6 +21,7 @@ import re
 from openai import OpenAI
 import html2text
 import requests
+from djne_scraper import buscar_publicacoes_djne
 
 # Configuração da página
 st.set_page_config(
@@ -69,6 +70,9 @@ if 'filters' not in st.session_state:
         'read_status': 'unread'  # unread, read, all
     }
 
+if 'fonte_dados' not in st.session_state:
+    st.session_state.fonte_dados = 'Gmail'  # Gmail ou DJNE
+
 # Função para conectar ao Gmail
 def get_gmail_service():
     """Conecta ao Gmail API"""
@@ -101,15 +105,23 @@ def search_emails(service, filters):
     
     query_parts = []
     
-    # Filtro de texto (assunto ou corpo)
+    # Filtro de texto (assunto ou corpo) - busca mais específica
     if filters.get('text_search'):
-        query_parts.append(f'({filters["text_search"]})')
+        # Busca no assunto OU no corpo do email
+        query_parts.append(f'(subject:{filters["text_search"]} OR {filters["text_search"]})')
     
-    # Filtro de data
+    # Filtro de data - ajusta para incluir as datas selecionadas
+    # Gmail usa 'after' e 'before' de forma EXCLUSIVA, então ajustamos:
     if filters.get('date_from'):
-        query_parts.append(f'after:{filters["date_from"]}')
+        # Subtrai 1 dia para incluir a data selecionada
+        date_obj = filters['date_from'] if hasattr(filters['date_from'], 'strftime') else datetime.strptime(filters['date_from'], '%Y/%m/%d').date()
+        adjusted_date = date_obj - timedelta(days=1)
+        query_parts.append(f'after:{adjusted_date.strftime("%Y/%m/%d")}')
     if filters.get('date_to'):
-        query_parts.append(f'before:{filters["date_to"]}')
+        # Adiciona 1 dia para incluir a data selecionada
+        date_obj = filters['date_to'] if hasattr(filters['date_to'], 'strftime') else datetime.strptime(filters['date_to'], '%Y/%m/%d').date()
+        adjusted_date = date_obj + timedelta(days=1)
+        query_parts.append(f'before:{adjusted_date.strftime("%Y/%m/%d")}')
     
     # Filtro de lido/não lido
     if filters.get('read_status') == 'unread':
@@ -413,72 +425,140 @@ st.markdown("---")
 # =============================================================================
 
 if st.session_state.current_step == 1:
-    st.header("1️⃣ Filtrar Emails da Caixa de Entrada")
+    st.header("1️⃣ Buscar Publicações")
+    
+    # Escolha da fonte de dados
+    st.subheader("📊 Fonte de Dados")
+    fonte = st.radio(
+        "Escolha onde buscar as publicações:",
+        options=['Gmail', 'DJNE'],
+        horizontal=True,
+        help="Gmail: busca em emails recebidos | DJNE: busca direta no Diário de Justiça Eletrônico Nacional"
+    )
+    st.session_state.fonte_dados = fonte
+    
+    st.markdown("---")
+    
+    # Filtros baseados na fonte escolhida
+    if fonte == 'Gmail':
+        st.subheader("🔍 Filtros de Email")
+    else:
+        st.subheader("🔍 Filtros de Busca DJNE")
     
     col1, col2, col3 = st.columns(3)
     
-    with col1:
-        st.subheader("🔍 Texto")
-        text_search = st.text_input(
-            "Buscar no assunto ou corpo",
-            value=st.session_state.filters.get('text_search', ''),
-            placeholder="Ex: intimação, publicação, processo"
-        )
-    
-    with col2:
-        st.subheader("📅 Data de Recebimento")
-        date_from = st.date_input(
-            "De:",
-            value=st.session_state.filters.get('date_from')
-        )
-        date_to = st.date_input(
-            "Até:",
-            value=st.session_state.filters.get('date_to')
-        )
-    
-    with col3:
-        st.subheader("📬 Status")
-        read_status = st.radio(
-            "Mostrar emails:",
-            options=['unread', 'read', 'all'],
-            format_func=lambda x: {
-                'unread': '📭 Não lidos',
-                'read': '📬 Lidos',
-                'all': '📧 Todos'
-            }[x],
-            index=['unread', 'read', 'all'].index(st.session_state.filters.get('read_status', 'unread'))
-        )
+    if fonte == 'Gmail':
+        with col1:
+            st.subheader("🔍 Texto")
+            text_search = st.text_input(
+                "Buscar no assunto ou corpo",
+                value=st.session_state.filters.get('text_search', ''),
+                placeholder="Ex: intimação, publicação, processo"
+            )
+        
+        with col2:
+            st.subheader("📅 Data de Recebimento")
+            date_from = st.date_input(
+                "De:",
+                value=st.session_state.filters.get('date_from') or (datetime.now() - timedelta(days=7)).date()
+            )
+            date_to = st.date_input(
+                "Até:",
+                value=st.session_state.filters.get('date_to') or datetime.now().date()
+            )
+        
+        with col3:
+            st.subheader("📬 Status")
+            read_status = st.radio(
+                "Mostrar emails:",
+                options=['unread', 'read', 'all'],
+                format_func=lambda x: {
+                    'unread': '📭 Não lidos',
+                    'read': '📬 Lidos',
+                    'all': '📧 Todos'
+                }[x],
+                index=['unread', 'read', 'all'].index(st.session_state.filters.get('read_status', 'unread'))
+            )
+    else:  # DJNE
+        text_search = ''
+        read_status = 'all'
+        
+        with col1:
+            st.info(f"👤 **Advogado:** {load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')}")
+        
+        with col2:
+            st.subheader("📅 Data da Publicação")
+            date_from = st.date_input(
+                "De:",
+                value=st.session_state.filters.get('date_from') or datetime.now().date()
+            )
+            date_to = st.date_input(
+                "Até:",
+                value=st.session_state.filters.get('date_to') or datetime.now().date()
+            )
+        
+        with col3:
+            st.info("ℹ️ A busca será feita diretamente no site do DJNE")
     
     st.markdown("---")
     
     # Botão Aplicar Filtros
     col1, col2, col3 = st.columns([2, 1, 2])
     with col2:
-        if st.button("🔍 APLICAR FILTROS", use_container_width=True, type="primary"):
-            # Atualiza filtros
+        btn_text = "🔍 BUSCAR NO GMAIL" if fonte == 'Gmail' else "🔍 BUSCAR NO DJNE"
+        if st.button(btn_text, use_container_width=True, type="primary"):
+            # Atualiza filtros (armazena datas como objetos date, não strings)
             st.session_state.filters = {
                 'text_search': text_search,
-                'date_from': date_from.strftime('%Y/%m/%d') if date_from else None,
-                'date_to': date_to.strftime('%Y/%m/%d') if date_to else None,
+                'date_from': date_from,
+                'date_to': date_to,
                 'read_status': read_status
             }
             
-            # Busca emails
-            with st.spinner("Buscando emails..."):
-                gmail_service = get_gmail_service()
-                if gmail_service:
-                    emails = search_emails(gmail_service, st.session_state.filters)
-                    st.session_state.filtered_emails = emails
-                    
-                    if emails:
-                        st.success(f"✅ {len(emails)} emails encontrados!")
-                        time.sleep(1)
-                        st.session_state.current_step = 2
-                        st.rerun()
+            if fonte == 'Gmail':
+                # Busca emails no Gmail
+                with st.spinner("Buscando emails no Gmail..."):
+                    gmail_service = get_gmail_service()
+                    if gmail_service:
+                        emails = search_emails(gmail_service, st.session_state.filters)
+                        st.session_state.filtered_emails = emails
+                        
+                        if emails:
+                            st.success(f"✅ {len(emails)} emails encontrados!")
+                            time.sleep(1)
+                            st.session_state.current_step = 2
+                            st.rerun()
+                        else:
+                            st.warning("Nenhum email encontrado com esses filtros.")
                     else:
-                        st.warning("Nenhum email encontrado com esses filtros.")
-                else:
-                    st.error("❌ Erro ao conectar com Gmail. Verifique a autenticação.")
+                        st.error("❌ Erro ao conectar com Gmail. Verifique a autenticação.")
+            else:  # DJNE
+                # Busca publicações no DJNE
+                with st.spinner("Buscando publicações no DJNE..."):
+                    try:
+                        nome_advogado = load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')
+                        publicacoes = buscar_publicacoes_djne(nome_advogado, date_from, date_to)
+                        
+                        # Converte publicações DJNE para formato compatível com emails
+                        # Pula direto para a etapa 3 (publicações já extraídas)
+                        for idx, pub in enumerate(publicacoes):
+                            pub['email_id'] = f"djne_{idx}"
+                            pub['email_subject'] = pub['source_subject']
+                            pub['email_sender'] = 'DJNE'
+                            pub['email_date'] = pub['data_disponibilizacao']
+                            pub['pub_id'] = f"djne_{idx}"
+                        
+                        st.session_state.extracted_publications = publicacoes
+                        
+                        if publicacoes:
+                            st.success(f"✅ {len(publicacoes)} publicações encontradas no DJNE!")
+                            time.sleep(1)
+                            st.session_state.current_step = 3  # Pula direto para validação
+                            st.rerun()
+                        else:
+                            st.warning("Nenhuma publicação encontrada no DJNE para este período.")
+                    except Exception as e:
+                        st.error(f"❌ Erro ao buscar no DJNE: {str(e)}")
 
 # =============================================================================
 # ETAPA 2: SELECIONAR EMAILS
@@ -496,7 +576,9 @@ elif st.session_state.current_step == 2:
         with col1:
             st.write("**Texto:**", filters.get('text_search') or "Nenhum")
         with col2:
-            st.write("**Período:**", f"{filters.get('date_from') or 'Início'} até {filters.get('date_to') or 'Hoje'}")
+            date_from_str = filters.get('date_from').strftime('%Y/%m/%d') if filters.get('date_from') else 'Início'
+            date_to_str = filters.get('date_to').strftime('%Y/%m/%d') if filters.get('date_to') else 'Hoje'
+            st.write("**Período:**", f"{date_from_str} até {date_to_str}")
         with col3:
             st.write("**Status:**", {
                 'unread': 'Não lidos',
@@ -548,6 +630,11 @@ elif st.session_state.current_step == 2:
     # Botões de navegação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step2", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
         if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
             st.session_state.current_step = 1
@@ -602,9 +689,12 @@ elif st.session_state.current_step == 3:
     
     # Exibir publicações
     for idx, pub in enumerate(st.session_state.extracted_publications):
+        # Indicador visual: ✅ se selecionado, 📄 se não
+        is_selected = pub['pub_id'] in st.session_state.selected_publication_ids
+        icon = '✅' if is_selected else '📄'
         with st.expander(
-            f"📄 **Processo: {pub['process_number']}** - Email: {pub['email_subject'][:60]}...",
-            expanded=False
+            f"{icon} **Processo: {pub['process_number']}** - Email: {pub['email_subject'][:60]}...",
+            expanded=True  # Expandido por padrão
         ):
             col1, col2 = st.columns([3, 1])
             
@@ -628,15 +718,15 @@ elif st.session_state.current_step == 3:
             
             with col2:
                 # Checkbox para seleção
-                is_selected = st.checkbox(
+                is_selected_pub = st.checkbox(
                     "Selecionar para gerar tarefa",
                     value=pub['pub_id'] in st.session_state.selected_publication_ids,
                     key=f"select_pub_{pub['pub_id']}"
                 )
                 
-                if is_selected and pub['pub_id'] not in st.session_state.selected_publication_ids:
+                if is_selected_pub and pub['pub_id'] not in st.session_state.selected_publication_ids:
                     st.session_state.selected_publication_ids.append(pub['pub_id'])
-                elif not is_selected and pub['pub_id'] in st.session_state.selected_publication_ids:
+                elif not is_selected_pub and pub['pub_id'] in st.session_state.selected_publication_ids:
                     st.session_state.selected_publication_ids.remove(pub['pub_id'])
     
     st.markdown("---")
@@ -644,6 +734,11 @@ elif st.session_state.current_step == 3:
     # Botões de navegação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step3", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
         if st.button("⬅️ Voltar aos Emails", use_container_width=True):
             st.session_state.current_step = 2
@@ -715,11 +810,16 @@ elif st.session_state.current_step == 4:
     # Botões de ação
     col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
     
+    
+    with col1:
+        if st.button("🏠", use_container_width=True, key="home_step4", help="Voltar ao Início"):
+            st.session_state.current_step = 1
+            st.rerun()
     with col2:
-        if st.button("⬅️ Voltar às Publicações", use_container_width=True):
+        btn_voltar = st.button("⬅️ Voltar às Publicações", use_container_width=True, key="btn_back_to_pubs")
+        if btn_voltar:
             st.session_state.current_step = 3
             st.rerun()
-    
     with col3:
         if st.button(
             f"🚀 CRIAR {len(selected_pubs)} TAREFAS",
