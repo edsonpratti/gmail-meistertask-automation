@@ -14,3 +14,4 @@ schedule==1.2.1
 
 # Utilitários
 python-dotenv==1.0.1
+beautifulsoup4==4.12.3
