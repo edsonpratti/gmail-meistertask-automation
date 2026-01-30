@@ -76,7 +76,6 @@ if 'found_tasks' not in st.session_state:
 
 if 'found_duplicates' not in st.session_state:
     st.session_state.found_duplicates = None
-
 if 'filters' not in st.session_state:
     st.session_state.filters = {
         'text_search': '',
@@ -90,13 +89,13 @@ if 'fonte_dados' not in st.session_state:
 
 # Validação de consistência do estado
 # Se está em etapas avançadas mas não tem dados, volta para o início
-if st.session_state.current_step > 1 and not st.session_state.filtered_emails:
+# EXCETO para DJNE que pula direto para etapa 3
+if st.session_state.current_step > 1 and not st.session_state.filtered_emails and not st.session_state.extracted_publications:
     st.session_state.current_step = 1
-if st.session_state.current_step > 2 and not st.session_state.selected_email_ids:
+if st.session_state.current_step > 2 and not st.session_state.selected_email_ids and not st.session_state.extracted_publications:
     st.session_state.current_step = 1
 if st.session_state.current_step > 3 and not st.session_state.extracted_publications:
     st.session_state.current_step = 1
-
 # Função para conectar ao Gmail
 def get_gmail_service():
     """Conecta ao Gmail API"""
@@ -244,64 +243,122 @@ def extract_email_body(message):
 def extract_publications_from_email(email_body, email_subject):
     """
     Extrai múltiplas publicações de processos judiciais de um email
-    Testa múltiplos padrões para encontrar as separações
+    Usa APENAS números como separadores (Publicação: 1, 2, 3...)
+    Ignora "Publicação: Intimacao" e similares
     """
     publications = []
     
     # DEBUG: Mostra amostra do email
-    st.info(f"📝 Primeiros 500 caracteres do email:\n{email_body[:500]}")
+    import streamlit as st
+    with st.expander("🔍 DEBUG - Conteúdo do Email", expanded=False):
+        st.text(f"Tamanho total: {len(email_body)} caracteres")
+        st.text(f"Primeiros 1000 caracteres:\n{email_body[:1000]}")
     
-    # Testa vários padrões possíveis em ordem de especificidade
-    patterns_to_try = [
-        (r'Publicação:\s*\d+\.\s+', 'Publicação: N. (com ponto e espaços)'),
-        (r'Publicação:\s*\d+\.', 'Publicação: N. (com ponto)'),
-        (r'Publicação:\s*\d+', 'Publicação: N (sem ponto)'),
-        (r'Publicação:', 'Publicação: (genérico)')
-    ]
+    # Padrão SIMPLES e DIRETO: Publicação seguido de número
+    # Ignora qualquer "Publicação: palavra" pois só queremos números
+    pattern = r'Publicação:\s*(\d+)\s+'
+    pub_matches = list(re.finditer(pattern, email_body, re.IGNORECASE))
     
-    pub_matches = None
-    pattern_used = None
+    st.info(f"🔍 Padrão 'Publicação: \\d+' encontrou {len(pub_matches)} matches")
     
-    for pattern, description in patterns_to_try:
-        matches = list(re.finditer(pattern, email_body, re.IGNORECASE))
-        if matches:
-            pub_matches = matches
-            pattern_used = description
-            st.info(f"🔍 Usando padrão: {description} - Encontradas {len(matches)} ocorrências")
-            break
-    
-    if not pub_matches:
-        st.warning("⚠️ Nenhum padrão de 'Publicação' encontrado. Tratando email como uma única publicação.")
-        publications.append({
-            'process_number': 'Sem número identificado',
-            'content': email_body[:5000],
-            'source_subject': email_subject
-        })
+    if pub_matches and len(pub_matches) > 0:
+        # Encontrou marcadores numerados (Publicação: 1, Publicação: 2, etc)
+        for i, match in enumerate(pub_matches):
+            # Início da publicação
+            start_pos = match.start()
+            
+            # Fim da publicação (início da próxima ou fim do texto)
+            end_pos = pub_matches[i + 1].start() if i + 1 < len(pub_matches) else len(email_body)
+            
+            # Extrai o conteúdo completo da publicação
+            pub_content = email_body[start_pos:end_pos].strip()
+            
+            # Procura por "PROCESSO:" primeiro (mais preciso para OAB/RJ)
+            process_pattern_marked = r'PROCESSO:\s*(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
+            process_match_marked = re.search(process_pattern_marked, pub_content, re.IGNORECASE)
+            
+            if process_match_marked:
+                process_number = process_match_marked.group(1)
+            else:
+                # Fallback: busca o padrão sem marcador
+                process_pattern = r'(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
+                process_match = re.search(process_pattern, pub_content)
+                process_number = process_match.group(0) if process_match else f'Publicação {match.group(1)}'
+            
+            publications.append({
+                'process_number': process_number,
+                'content': pub_content,
+                'source_subject': email_subject
+            })
+        
+        st.success(f"✅ Extraídas {len(publications)} publicações usando padrão numerado")
         return publications
     
-    # Para cada match, extrai o bloco completo
-    for i, match in enumerate(pub_matches):
-        # Início da publicação
-        start_pos = match.start()
-        
-        # Fim da publicação (início da próxima ou fim do texto)
-        end_pos = pub_matches[i + 1].start() if i + 1 < len(pub_matches) else len(email_body)
-        
-        # Extrai o conteúdo completo da publicação
-        pub_content = email_body[start_pos:end_pos].strip()
-        
-        # Tenta extrair número do processo (padrão brasileiro)
-        process_pattern = r'(\d{7}-\d{2}\.\d{4}\.\d{1}\.\d{2}\.\d{4})'
-        process_match = re.search(process_pattern, pub_content)
-        process_number = process_match.group(0) if process_match else f'Publicação {i+1}'
-        
-        publications.append({
-            'process_number': process_number,
-            'content': pub_content,
-            'source_subject': email_subject
-        })
+    # Se não encontrou "Publicação: N", tenta outros padrões
+    st.warning("⚠️ Padrão 'Publicação: N' não encontrado, tentando 'PROCESSO:'")
     
-    st.success(f"✅ Extraídas {len(publications)} publicações usando padrão: {pattern_used}")
+    # Busca por "PROCESSO:" como separador direto
+    process_pattern = r'PROCESSO:\s*(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
+    process_matches = list(re.finditer(process_pattern, email_body, re.IGNORECASE))
+    
+    st.info(f"🔍 Padrão 'PROCESSO:' encontrou {len(process_matches)} matches")
+    
+    if process_matches:
+        # Encontrou processos com marcador "PROCESSO:"
+        for i, match in enumerate(process_matches):
+            process_number = match.group(1)
+            # Pega todo o bloco desta publicação
+            start = max(0, match.start() - 200)  # 200 chars antes para pegar cabeçalho
+            # Procura o próximo "PROCESSO:" ou fim do texto
+            if i + 1 < len(process_matches):
+                end = process_matches[i + 1].start()
+            else:
+                end = len(email_body)
+            
+            pub_content = email_body[start:end].strip()
+            
+            publications.append({
+                'process_number': process_number,
+                'content': pub_content,
+                'source_subject': email_subject
+            })
+        
+        st.success(f"✅ Extraídas {len(publications)} publicações usando 'PROCESSO:'")
+        return publications
+    
+    # Fallback final: busca padrão de processo sem marcador
+    st.warning("⚠️ 'PROCESSO:' não encontrado, buscando padrão direto de processo")
+    
+    process_pattern_simple = r'\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4}'
+    process_matches_simple = list(re.finditer(process_pattern_simple, email_body))
+    
+    st.info(f"🔍 Padrão direto encontrou {len(process_matches_simple)} matches")
+    
+    if process_matches_simple:
+        for match in process_matches_simple:
+            process_number = match.group(0)
+            # Pega contexto ao redor
+            start = max(0, match.start() - 200)
+            end = min(len(email_body), match.end() + 1500)
+            pub_content = email_body[start:end].strip()
+            
+            publications.append({
+                'process_number': process_number,
+                'content': pub_content,
+                'source_subject': email_subject
+            })
+        
+        st.success(f"✅ Extraídas {len(publications)} publicações por padrão direto")
+        return publications
+    
+    # Não encontrou nada
+    st.error("❌ Nenhum padrão encontrado - tratando como publicação única")
+    publications.append({
+        'process_number': 'Sem número identificado',
+        'content': email_body[:5000],
+        'source_subject': email_subject
+    })
+    
     return publications
 
 # Função para extrair nomes das partes de uma publicação
@@ -636,7 +693,6 @@ def find_duplicate_tasks(tasks, only_unassigned=True):
                 st.text(f"... e mais {len(tasks_without_process) - 10} tarefas")
     
     return duplicates
-
 # =============================================================================
 # INTERFACE PRINCIPAL
 # =============================================================================
@@ -737,6 +793,7 @@ if st.session_state.current_step == 1:
         st.subheader("🔍 Filtros de Busca DJNE")
     
     col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
     
     if fonte == 'Gmail':
         with col1:
@@ -828,28 +885,38 @@ if st.session_state.current_step == 1:
                 with st.spinner("Buscando publicações no DJNE..."):
                     try:
                         nome_advogado = load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')
+                        st.info(f"🔍 Buscando por: {nome_advogado}")
+                        st.info(f"📅 Período: {date_from.strftime('%d/%m/%Y')} até {date_to.strftime('%d/%m/%Y')}")
+                        
                         publicacoes = buscar_publicacoes_djne(nome_advogado, date_from, date_to)
+                        
+                        st.info(f"📦 Publicações retornadas: {len(publicacoes)}")
                         
                         # Converte publicações DJNE para formato compatível com emails
                         # Pula direto para a etapa 3 (publicações já extraídas)
                         for idx, pub in enumerate(publicacoes):
                             pub['email_id'] = f"djne_{idx}"
-                            pub['email_subject'] = pub['source_subject']
+                            pub['email_subject'] = pub.get('source_subject', f"DJNE - {pub.get('process_number', 'Sem número')}")
                             pub['email_sender'] = 'DJNE'
-                            pub['email_date'] = pub['data_disponibilizacao']
+                            pub['email_date'] = pub.get('data_disponibilizacao', '')
                             pub['pub_id'] = f"djne_{idx}"
+                            pub['origem'] = 'DJNE'
                         
                         st.session_state.extracted_publications = publicacoes
+                        st.session_state.data_source = 'djne'
                         
                         if publicacoes:
                             st.success(f"✅ {len(publicacoes)} publicações encontradas no DJNE!")
-                            time.sleep(1)
+                            st.info(f"🔄 Avançando para etapa 3 (validação)")
+                            time.sleep(2)
                             st.session_state.current_step = 3  # Pula direto para validação
                             st.rerun()
                         else:
                             st.warning("Nenhuma publicação encontrada no DJNE para este período.")
                     except Exception as e:
                         st.error(f"❌ Erro ao buscar no DJNE: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
 # =============================================================================
 # ETAPA 2: SELECIONAR EMAILS
@@ -944,17 +1011,43 @@ elif st.session_state.current_step == 2:
                 
                 for email in st.session_state.filtered_emails:
                     if email['id'] in st.session_state.selected_email_ids:
-                        # Extrai publicações do email
-                        email_pubs = extract_publications_from_email(email['body'], email['subject'])
-                        
-                        # Adiciona metadados
-                        for pub in email_pubs:
-                            pub['email_id'] = email['id']
-                            pub['email_subject'] = email['subject']
-                            pub['email_sender'] = email['sender']
-                            pub['email_date'] = email['date']
-                            pub['pub_id'] = f"{email['id']}_{len(publications)}"
-                            publications.append(pub)
+                        # Se for DJNE, o email já É a publicação
+                        if email.get('origem') == 'DJNE':
+                            pub_data = email.get('raw_data', {})
+                            publications.append({
+                                'process_number': pub_data.get('process_number', 'Não identificado'),
+                                'content': email['body'],
+                                'source_subject': email['subject'],
+                                'email_id': email['id'],
+                                'email_subject': email['subject'],
+                                'email_sender': email['sender'],
+                                'email_date': email['date'],
+                                'pub_id': email['id'],
+                                'origem': 'DJNE',
+                                'orgao': pub_data.get('orgao', ''),
+                                'tribunal': pub_data.get('tribunal', ''),
+                                'tipo_comunicacao': pub_data.get('tipo_comunicacao', '')
+                            })
+                        else:
+                            # Gmail: extrai publicações do email
+                            st.info(f"📧 Processando email: {email['subject'][:50]}...")
+                            st.info(f"📏 Tamanho do corpo: {len(email['body'])} caracteres")
+                            
+                            # Mostra preview do conteúdo
+                            with st.expander("👁️ VER CONTEÚDO DO EMAIL", expanded=True):
+                                st.text(email['body'][:2000])
+                            
+                            email_pubs = extract_publications_from_email(email['body'], email['subject'])
+                            
+                            # Adiciona metadados
+                            for pub in email_pubs:
+                                pub['email_id'] = email['id']
+                                pub['email_subject'] = email['subject']
+                                pub['email_sender'] = email['sender']
+                                pub['email_date'] = email['date']
+                                pub['pub_id'] = f"{email['id']}_{len(publications)}"
+                                pub['origem'] = 'Gmail'
+                                publications.append(pub)
                 
                 st.session_state.extracted_publications = publications
                 
@@ -976,6 +1069,13 @@ elif st.session_state.current_step == 3:
     total_pubs = len(st.session_state.extracted_publications)
     st.info(f"📋 Total de publicações extraídas: **{total_pubs}**")
     
+    # Debug
+    if total_pubs == 0:
+        st.warning("⚠️ Nenhuma publicação encontrada no estado da sessão!")
+        st.info("Clique em 'Voltar aos Filtros' para fazer uma nova busca.")
+    else:
+        st.success(f"✅ {total_pubs} publicações carregadas com sucesso")
+    
     st.markdown("---")
     
     # Exibir publicações
@@ -991,8 +1091,19 @@ elif st.session_state.current_step == 3:
             
             with col1:
                 st.markdown(f"**Número do Processo:** {pub['process_number']}")
-                st.markdown(f"**Email de Origem:** {pub['email_subject']}")
-                st.markdown(f"**Remetente:** {pub['email_sender']}")
+                
+                # Informações específicas do DJNE
+                if pub.get('origem') == 'DJNE':
+                    if pub.get('tribunal'):
+                        st.markdown(f"**Tribunal:** {pub['tribunal']}")
+                    if pub.get('orgao'):
+                        st.markdown(f"**Órgão:** {pub['orgao']}")
+                    if pub.get('tipo_comunicacao'):
+                        st.markdown(f"**Tipo:** {pub['tipo_comunicacao']}")
+                else:
+                    st.markdown(f"**Email de Origem:** {pub['email_subject']}")
+                    st.markdown(f"**Remetente:** {pub['email_sender']}")
+                
                 st.markdown(f"**Data:** {pub['email_date']}")
                 
                 st.markdown("---")
@@ -1031,9 +1142,15 @@ elif st.session_state.current_step == 3:
             st.session_state.current_step = 1
             st.rerun()
     with col2:
-        if st.button("⬅️ Voltar aos Emails", use_container_width=True):
-            st.session_state.current_step = 2
-            st.rerun()
+        # Se for DJNE, volta para filtros (etapa 1), senão volta para emails (etapa 2)
+        if st.session_state.get('data_source') == 'djne':
+            if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
+                st.session_state.current_step = 1
+                st.rerun()
+        else:
+            if st.button("⬅️ Voltar aos Emails", use_container_width=True):
+                st.session_state.current_step = 2
+                st.rerun()
     
     with col3:
         selected_count = len(st.session_state.selected_publication_ids)
@@ -1237,7 +1354,6 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
     st.title("🔍 Gerenciamento de Tarefas Duplicadas")
     st.markdown("Esta ferramenta identifica e permite excluir tarefas duplicadas na seção **Publicações** do MeisterTask.")
     st.markdown("**Critério:** Tarefas com o mesmo número de processo são consideradas duplicatas.")
-    
     st.markdown("---")
     
     # Carregar credenciais
@@ -1408,3 +1524,4 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
 # Footer
 st.markdown("---")
 st.caption("📧 Sistema de Automação Gmail → MeisterTask | Desenvolvido com Streamlit")
+# v2.0

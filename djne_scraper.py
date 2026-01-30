@@ -53,8 +53,10 @@ def buscar_publicacoes_djne(nome_advogado, data_inicio, data_fim=None):
         session = requests.Session()
         
         # Primeira requisição - carrega a página
+        print(f"DEBUG: Acessando URL: {url}")
         response = session.get(url, headers=headers, timeout=30)
         response.raise_for_status()
+        print(f"DEBUG: Resposta HTTP: {response.status_code}")
         
         # Tenta acessar a API diretamente (o site usa uma API JSON)
         # URL da API baseada na análise do site
@@ -68,51 +70,71 @@ def buscar_publicacoes_djne(nome_advogado, data_inicio, data_fim=None):
             'pagina': 0
         }
         
+        print(f"DEBUG: Chamando API: {api_url}")
+        print(f"DEBUG: Parâmetros: {params}")
         api_response = session.get(api_url, params=params, headers=headers, timeout=30)
+        print(f"DEBUG: API Response Status: {api_response.status_code}")
         
         publicacoes = []
         
         if api_response.status_code == 200:
             try:
                 data = api_response.json()
+                print(f"DEBUG: JSON recebido, tipo: {type(data)}")
                 
                 # A API retorna JSON com lista de comunicações
-                comunicacoes = data.get('items', []) if isinstance(data, dict) else []
+                if isinstance(data, dict):
+                    comunicacoes = data.get('items', []) or data.get('content', []) or data.get('data', [])
+                    total = data.get('total', len(comunicacoes))
+                    print(f"DEBUG: Encontradas {len(comunicacoes)} comunicações (total: {total})")
+                else:
+                    comunicacoes = []
+                    print(f"DEBUG: Resposta não é dict, é {type(data)}")
                 
                 for com in comunicacoes:
-                    numero_processo = com.get('numeroprocessocommascara') or com.get('numero_processo') or 'Não identificado'
+                    numero_processo = com.get('numeroprocessocommascara') or com.get('numero_processo') or com.get('numeroProcesso') or 'Não identificado'
                     
                     publicacao = {
                         'process_number': numero_processo,
-                        'orgao': com.get('nomeOrgao', 'Não identificado'),
-                        'data_disponibilizacao': com.get('datadisponibilizacao') or com.get('data_disponibilizacao') or '',
-                        'tipo_comunicacao': com.get('tipoComunicacao', 'Intimação'),
-                        'content': com.get('texto', ''),
+                        'orgao': com.get('nomeOrgao') or com.get('orgao') or 'Não identificado',
+                        'data_disponibilizacao': com.get('datadisponibilizacao') or com.get('data_disponibilizacao') or com.get('dataDisponibilizacao') or '',
+                        'tipo_comunicacao': com.get('tipoComunicacao') or com.get('tipo_comunicacao') or 'Intimação',
+                        'content': com.get('texto') or com.get('conteudo') or com.get('content') or '',
                         'source_subject': f"DJNE - {numero_processo}",
                         'origem': 'DJNE'
                     }
                     
+                    print(f"DEBUG: Publicação extraída - Processo: {numero_processo}")
                     publicacoes.append(publicacao)
                 
+                print(f"DEBUG: Total de publicações extraídas da API: {len(publicacoes)}")
                 return publicacoes
                 
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
                 # API não retornou JSON, tenta fazer scraping do HTML
+                print(f"DEBUG: Erro ao decodificar JSON: {e}")
+                print(f"DEBUG: Conteúdo da resposta (primeiros 500 chars): {api_response.text[:500]}")
                 pass
+        else:
+            print(f"DEBUG: API retornou status {api_response.status_code}, tentando scraping HTML")
         
         # Fallback: scraping do HTML se API não funcionou
+        print("DEBUG: Usando fallback de scraping HTML...")
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(response.text, 'html.parser')
         texto_completo = soup.get_text(separator='\n')
+        print(f"DEBUG: HTML convertido para texto, tamanho: {len(texto_completo)} caracteres")
         
         # Procura pelo padrão "Processo XXXX"
         processo_pattern = r'Processo\s+(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
         
         # Encontra todos os processos
         matches = list(re.finditer(processo_pattern, texto_completo, re.IGNORECASE))
+        print(f"DEBUG: Encontrados {len(matches)} processos no HTML")
         
         if not matches:
             # Não encontrou publicações
+            print("DEBUG: Nenhuma publicação encontrada")
             return []
         
         # Para cada processo encontrado, extrai o bloco de conteúdo
@@ -149,9 +171,13 @@ def buscar_publicacoes_djne(nome_advogado, data_inicio, data_fim=None):
             
             publicacoes.append(publicacao)
         
+        print(f"DEBUG: Total de publicações extraídas do HTML: {len(publicacoes)}")
         return publicacoes
         
     except Exception as e:
+        print(f"DEBUG: Exceção capturada: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise Exception(f"Erro ao processar publicações do DJNE: {str(e)}")
 
 
