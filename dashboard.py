@@ -575,11 +575,23 @@ def delete_meistertask_task(task_id, api_token):
     """
     Move uma tarefa do MeisterTask para a lixeira (trash)
     A API do MeisterTask usa PUT com status=18 para enviar tarefas para a lixeira
+    
+    Retorna:
+        (bool, str): (sucesso, mensagem)
+        - True se a tarefa foi deletada ou já estava deletada
+        - False apenas se houver um erro real que impeça a operação
     """
     # Primeiro verifica se a tarefa existe
     success, task_data = get_meistertask_task(task_id, api_token)
     if not success:
+        # Se retornou 404 na verificação, a tarefa já foi deletada
+        if "404" in str(task_data):
+            return True, f"✓ Tarefa ID {task_id} já estava deletada (404 na verificação)"
         return False, f"Não foi possível verificar a tarefa antes de deletar: {task_data}"
+    
+    # Verifica se a tarefa já está na lixeira (status 18)
+    if isinstance(task_data, dict) and task_data.get('status') == 18:
+        return True, f"✓ Tarefa ID {task_id} já estava na lixeira (status 18)"
     
     url = f"https://www.meistertask.com/api/tasks/{task_id}"
     
@@ -598,23 +610,24 @@ def delete_meistertask_task(task_id, api_token):
             if response.status_code == 200:
                 result = response.json()
                 new_status = result.get('status', 'unknown')
-                return True, f"Tarefa movida para lixeira (novo status: {new_status})"
-            return True, "Tarefa movida para lixeira com sucesso"
+                return True, f"✓ Tarefa movida para lixeira (novo status: {new_status})"
+            return True, "✓ Tarefa movida para lixeira com sucesso"
         elif response.status_code == 400:
             # Se status=18 não funcionar, tenta outros valores conhecidos
-            # Status 2 = Completa, pode precisar disso antes
             error_msg = response.text[:200] if len(response.text) > 200 else response.text
-            return False, f"Não foi possível mover para lixeira. Resposta da API: {error_msg}"
+            return False, f"⚠ Não foi possível mover para lixeira. API: {error_msg}"
         elif response.status_code == 403:
-            return False, "Sem permissão para deletar esta tarefa"
+            return False, f"✗ Sem permissão para deletar tarefa ID {task_id}"
         elif response.status_code == 404:
-            return False, "Tarefa não encontrada"
+            # 404 pode significar que a tarefa já foi deletada anteriormente
+            # Consideramos isso como sucesso
+            return True, f"✓ Tarefa ID {task_id} já estava deletada (404 NOT_FOUND)"
         else:
             error_msg = response.text[:300] if len(response.text) > 300 else response.text
-            return False, f"Erro ao deletar (status {response.status_code}): {error_msg}"
+            return False, f"✗ Erro ao deletar (HTTP {response.status_code}): {error_msg}"
             
     except requests.exceptions.RequestException as e:
-        return False, f"Erro de conexão: {str(e)}"
+        return False, f"✗ Erro de conexão: {str(e)}"
 
 
 def extract_process_number(task_name):
@@ -1472,8 +1485,10 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
                         status_text = st.empty()
                         
                         success_count = 0
+                        already_deleted_count = 0
                         error_count = 0
                         errors = []
+                        success_messages = []
                         
                         for idx, task_id in enumerate(tasks_to_delete, 1):
                             status_text.text(f"Excluindo tarefa {idx} de {len(tasks_to_delete)}...")
@@ -1482,10 +1497,16 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
                             success, message = delete_meistertask_task(task_id, api_token)
                             
                             if success:
-                                success_count += 1
+                                # Verifica se já estava deletada (404)
+                                if "404" in message or "já estava deletada" in message or "já estava na lixeira" in message:
+                                    already_deleted_count += 1
+                                    success_messages.append(f"⚠️ {message}")
+                                else:
+                                    success_count += 1
+                                    success_messages.append(f"✓ {message}")
                             else:
                                 error_count += 1
-                                errors.append(f"Tarefa ID {task_id}: {message}")
+                                errors.append(f"✗ Tarefa ID {task_id}: {message}")
                             
                             time.sleep(0.3)  # Evita rate limiting
                         
@@ -1496,19 +1517,44 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
                         st.markdown("---")
                         st.subheader("📊 Resultado da Exclusão")
                         
-                        col1, col2 = st.columns(2)
+                        # Resumo em colunas
+                        col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.success(f"✅ **{success_count}** tarefas excluídas com sucesso!")
-                        
+                            st.metric("✅ Deletadas", success_count)
                         with col2:
-                            if error_count > 0:
-                                st.error(f"❌ **{error_count}** erros")
-                                with st.expander("Ver erros"):
-                                    for error in errors:
-                                        st.code(error)
+                            st.metric("⚠️ Já Deletadas", already_deleted_count)
+                        with col3:
+                            st.metric("❌ Erros", error_count)
                         
-                        st.balloons()
-                        st.success("🎉 Processo de limpeza concluído! Clique em 'Reiniciar Processo' para buscar novamente.")
+                        # Detalhes
+                        if success_count > 0:
+                            with st.expander(f"✅ Ver {success_count} tarefas deletadas com sucesso", expanded=False):
+                                for msg in success_messages:
+                                    if msg.startswith("✓"):
+                                        st.success(msg)
+                        
+                        if already_deleted_count > 0:
+                            with st.expander(f"⚠️ Ver {already_deleted_count} tarefas já deletadas (404)", expanded=True):
+                                st.info("Estas tarefas retornaram erro 404 (NOT_FOUND), o que indica que já foram deletadas anteriormente ou não existem mais.")
+                                for msg in success_messages:
+                                    if msg.startswith("⚠️"):
+                                        st.warning(msg)
+                        
+                        if error_count > 0:
+                            with st.expander(f"❌ Ver {error_count} erros reais", expanded=True):
+                                st.error("Estes erros precisam de atenção:")
+                                for error in errors:
+                                    st.code(error)
+                        
+                        # Mensagem final
+                        total_processed = success_count + already_deleted_count
+                        if error_count == 0:
+                            st.balloons()
+                            st.success(f"🎉 Processo concluído! {total_processed} tarefas processadas sem erros.")
+                        else:
+                            st.warning(f"⚠️ Processo concluído com {error_count} erro(s). {total_processed} tarefas processadas com sucesso.")
+                        
+                        st.info("💡 Clique em 'Reiniciar Processo' na barra lateral para buscar novamente.")
                         
                         # Limpar estado após exclusão
                         st.session_state.found_duplicates = None
