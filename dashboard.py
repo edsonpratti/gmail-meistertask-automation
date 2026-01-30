@@ -494,6 +494,10 @@ def list_meistertask_tasks(section_id, api_token):
     Lista TODAS as tarefas de uma seção do MeisterTask (com paginação)
     A API retorna no máximo 50 tarefas por página, então precisamos fazer múltiplas requisições
     """
+    # Validação básica dos parâmetros
+    if not section_id or not api_token:
+        return False, "❌ Section ID ou API Token não configurados"
+    
     all_tasks = []
     page = 1
     
@@ -536,16 +540,66 @@ def list_meistertask_tasks(section_id, api_token):
                 if page > 20:  # Máximo 1000 tarefas (20 páginas x 50)
                     st.warning("⚠️ Limite de páginas atingido. Se houver mais tarefas, elas não foram carregadas.")
                     break
-                
+            
+            elif response.status_code == 404:
+                # Section ID inválido ou não existe
+                error_msg = f"""
+❌ **Erro 404: Seção não encontrada**
+
+A seção com ID `{section_id}` não existe ou você não tem acesso a ela.
+
+**Possíveis causas:**
+1. O `MEISTERTASK_SECTION_ID` no arquivo `.env` está incorreto
+2. A seção foi deletada do MeisterTask
+3. Você não tem permissão para acessar esta seção
+
+**Como corrigir:**
+1. Acesse o MeisterTask no navegador
+2. Vá até o quadro/projeto desejado
+3. Abra a seção "Publicações" (ou outra que deseja usar)
+4. Copie o ID da seção da URL (número após `/sections/`)
+5. Atualize o valor de `MEISTERTASK_SECTION_ID` no arquivo `.env`
+
+**ID atual configurado:** `{section_id}`
+"""
+                return False, error_msg
+            
+            elif response.status_code == 401:
+                # Token inválido ou expirado
+                error_msg = """
+❌ **Erro 401: Não autorizado**
+
+O token de API está inválido ou expirado.
+
+**Como corrigir:**
+1. Acesse o MeisterTask: Account Settings → Developer
+2. Gere um novo token de API
+3. Atualize `MEISTERTASK_API_TOKEN` no arquivo `.env`
+"""
+                return False, error_msg
+            
+            elif response.status_code == 403:
+                # Sem permissão
+                return False, f"❌ Erro 403: Sem permissão para acessar a seção {section_id}"
+            
             else:
-                error_detail = f"Status {response.status_code}: {response.text}"
-                return False, error_detail
+                # Outros erros
+                try:
+                    error_detail = response.json()
+                    error_msg = error_detail.get('message', response.text[:200])
+                except:
+                    error_msg = response.text[:200]
+                return False, f"❌ Erro HTTP {response.status_code}: {error_msg}"
         
         st.success(f"✅ Total de tarefas carregadas: {len(all_tasks)} (de {page} página(s))")
         return True, all_tasks
             
+    except requests.exceptions.Timeout:
+        return False, "❌ Timeout: A requisição demorou mais de 30 segundos"
+    except requests.exceptions.ConnectionError:
+        return False, "❌ Erro de conexão: Verifique sua internet"
     except requests.exceptions.RequestException as e:
-        return False, f"Erro de conexão: {str(e)}"
+        return False, f"❌ Erro de conexão: {str(e)}"
 
 
 def get_meistertask_task(task_id, api_token):
@@ -564,11 +618,13 @@ def get_meistertask_task(task_id, api_token):
         
         if response.status_code == 200:
             return True, response.json()
+        elif response.status_code == 404:
+            return False, "404_NOT_FOUND"
         else:
-            return False, f"Status {response.status_code}"
+            return False, f"HTTP_{response.status_code}"
             
     except requests.exceptions.RequestException as e:
-        return False, f"Erro de conexão: {str(e)}"
+        return False, f"CONNECTION_ERROR: {str(e)}"
 
 
 def delete_meistertask_task(task_id, api_token):
@@ -578,21 +634,9 @@ def delete_meistertask_task(task_id, api_token):
     
     Retorna:
         (bool, str): (sucesso, mensagem)
-        - True se a tarefa foi deletada ou já estava deletada
+        - True se a tarefa foi deletada ou já estava deletada (404)
         - False apenas se houver um erro real que impeça a operação
     """
-    # Primeiro verifica se a tarefa existe
-    success, task_data = get_meistertask_task(task_id, api_token)
-    if not success:
-        # Se retornou 404 na verificação, a tarefa já foi deletada
-        if "404" in str(task_data):
-            return True, f"✓ Tarefa ID {task_id} já estava deletada (404 na verificação)"
-        return False, f"Não foi possível verificar a tarefa antes de deletar: {task_data}"
-    
-    # Verifica se a tarefa já está na lixeira (status 18)
-    if isinstance(task_data, dict) and task_data.get('status') == 18:
-        return True, f"✓ Tarefa ID {task_id} já estava na lixeira (status 18)"
-    
     url = f"https://www.meistertask.com/api/tasks/{task_id}"
     
     headers = {
@@ -606,28 +650,48 @@ def delete_meistertask_task(task_id, api_token):
         response = requests.put(url, headers=headers, json=trash_data, timeout=30)
         
         if response.status_code in [200, 204]:
-            # Verifica a resposta para debug
+            # Sucesso: tarefa movida para lixeira
             if response.status_code == 200:
-                result = response.json()
-                new_status = result.get('status', 'unknown')
-                return True, f"✓ Tarefa movida para lixeira (novo status: {new_status})"
-            return True, "✓ Tarefa movida para lixeira com sucesso"
-        elif response.status_code == 400:
-            # Se status=18 não funcionar, tenta outros valores conhecidos
-            error_msg = response.text[:200] if len(response.text) > 200 else response.text
-            return False, f"⚠ Não foi possível mover para lixeira. API: {error_msg}"
-        elif response.status_code == 403:
-            return False, f"✗ Sem permissão para deletar tarefa ID {task_id}"
+                try:
+                    result = response.json()
+                    new_status = result.get('status', 'unknown')
+                    return True, f"✓ Tarefa ID {task_id[:8]}... movida para lixeira (status: {new_status})"
+                except:
+                    return True, f"✓ Tarefa ID {task_id[:8]}... movida para lixeira"
+            return True, f"✓ Tarefa ID {task_id[:8]}... deletada com sucesso"
+        
         elif response.status_code == 404:
-            # 404 pode significar que a tarefa já foi deletada anteriormente
-            # Consideramos isso como sucesso
-            return True, f"✓ Tarefa ID {task_id} já estava deletada (404 NOT_FOUND)"
+            # 404 NOT_FOUND: tarefa já foi deletada anteriormente ou nunca existiu
+            # Consideramos como SUCESSO pois o objetivo (tarefa não existir) foi alcançado
+            return True, f"⚠ Tarefa ID {task_id[:8]}... já estava deletada (404: NOT_FOUND)"
+        
+        elif response.status_code == 403:
+            # 403 FORBIDDEN: sem permissão
+            return False, f"✗ Sem permissão para deletar tarefa ID {task_id[:8]}... (403: FORBIDDEN)"
+        
+        elif response.status_code == 400:
+            # 400 BAD_REQUEST: parâmetros inválidos
+            try:
+                error_detail = response.json()
+                error_msg = error_detail.get('message', response.text[:200])
+            except:
+                error_msg = response.text[:200]
+            return False, f"✗ Requisição inválida para tarefa ID {task_id[:8]}... (400): {error_msg}"
+        
         else:
-            error_msg = response.text[:300] if len(response.text) > 300 else response.text
-            return False, f"✗ Erro ao deletar (HTTP {response.status_code}): {error_msg}"
+            # Outros erros HTTP
+            try:
+                error_msg = response.text[:200]
+            except:
+                error_msg = "Resposta não disponível"
+            return False, f"✗ Erro HTTP {response.status_code} ao deletar tarefa ID {task_id[:8]}...: {error_msg}"
             
+    except requests.exceptions.Timeout:
+        return False, f"✗ Timeout ao deletar tarefa ID {task_id[:8]}... (>30s)"
+    except requests.exceptions.ConnectionError:
+        return False, f"✗ Erro de conexão ao deletar tarefa ID {task_id[:8]}..."
     except requests.exceptions.RequestException as e:
-        return False, f"✗ Erro de conexão: {str(e)}"
+        return False, f"✗ Erro de rede ao deletar tarefa ID {task_id[:8]}...: {str(e)[:100]}"
 
 
 def extract_process_number(task_name):
@@ -1373,9 +1437,46 @@ if st.session_state.app_mode == 'gerenciar_duplicatas':
     api_token = load_env_var('MEISTERTASK_API_TOKEN')
     section_id = load_env_var('MEISTERTASK_SECTION_ID')
     
+    # Verificação e exibição das credenciais
+    col1, col2 = st.columns(2)
+    with col1:
+        if api_token:
+            st.success(f"🔑 API Token: Configurado (`...{api_token[-8:]}`)")
+        else:
+            st.error("🔑 API Token: ❌ Não configurado")
+    with col2:
+        if section_id:
+            st.success(f"📌 Section ID: `{section_id}`")
+        else:
+            st.error("📌 Section ID: ❌ Não configurado")
+    
     if not api_token or not section_id:
-        st.error("❌ Erro: MEISTERTASK_API_TOKEN ou MEISTERTASK_SECTION_ID não configurados no arquivo .env")
+        st.error("❌ **Configuração incompleta**")
+        st.markdown("""
+        **Como configurar:**
+        
+        1. Crie ou edite o arquivo `.env` na raiz do projeto
+        2. Adicione as seguintes linhas:
+        
+        ```
+        MEISTERTASK_API_TOKEN=seu_token_aqui
+        MEISTERTASK_SECTION_ID=id_da_secao_aqui
+        ```
+        
+        **Para obter o API Token:**
+        - Acesse: [MeisterTask Account Settings → Developer](https://www.meistertask.com/app/settings/developer)
+        - Clique em "Generate New Token"
+        - Copie o token gerado
+        
+        **Para obter o Section ID:**
+        - Abra o MeisterTask no navegador
+        - Navegue até a seção "Publicações" (ou a seção desejada)
+        - Copie o número que aparece na URL após `/sections/`
+        - Exemplo: `https://www.meistertask.com/app/section/12345678` → Section ID = `12345678`
+        """)
         st.stop()
+    
+    st.markdown("---")
     
     # Botão para buscar tarefas
     col1, col2, col3 = st.columns([1, 2, 1])
