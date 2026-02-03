@@ -1,3 +1,9 @@
+# Streamlit
+streamlit==1.31.0
+
+# Data manipulation
+pandas==2.1.4
+
 # Gmail API
 google-api-python-client==2.111.0
 google-auth-httplib2==0.2.0
@@ -15,3 +21,5 @@ schedule==1.2.1
 # Utilitários
 python-dotenv==1.0.1
 beautifulsoup4==4.12.3
+html2text==2020.1.16
+lxml==5.1.0
