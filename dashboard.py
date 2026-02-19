@@ -31,6 +31,98 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ── Tema visual ──────────────────────────────────────────────────────────────
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+    /* Fonte global */
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+
+    /* Fundo principal — branco */
+    .stApp { background-color: #ffffff; }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: #f8f9fa !important;
+        border-right: 1px solid #e5e7eb;
+    }
+
+    /* Botão primário */
+    .stButton > button[kind="primary"] {
+        background: #2563eb !important;
+        color: #fff !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background: #1d4ed8 !important;
+        transform: translateY(-1px);
+    }
+
+    /* Botão secundário */
+    .stButton > button {
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        transition: all 0.15s ease;
+    }
+
+    /* Cards / expanders */
+    .streamlit-expanderHeader {
+        background: #f9fafb !important;
+        border-radius: 10px !important;
+        border: 1px solid #e5e7eb !important;
+        font-weight: 600 !important;
+    }
+    .streamlit-expanderContent {
+        background: #ffffff !important;
+        border: 1px solid #e5e7eb !important;
+        border-top: none !important;
+        border-radius: 0 0 10px 10px !important;
+    }
+
+    /* Inputs */
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stDateInput > div > div > input {
+        background: #ffffff !important;
+        border: 1px solid #d1d5db !important;
+        border-radius: 8px !important;
+    }
+
+    /* Info / Warning / Success / Error boxes */
+    .stAlert { border-radius: 8px !important; }
+
+    /* Divisor */
+    hr { border-color: #e5e7eb !important; }
+
+    /* Métricas */
+    [data-testid="metric-container"] {
+        background: #f9fafb;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 0.8rem 1rem;
+    }
+
+    /* Step badge */
+    .step-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        margin-bottom: 6px;
+        width: 100%;
+    }
+    .step-active  { background:#4f6ef722; color:#4f6ef7 !important; border:1px solid #4f6ef7; }
+    .step-done    { background:#10b98122; color:#10b981 !important; border:1px solid #10b981; text-decoration: line-through; opacity: 0.7; }
+    .step-pending { background:#f3f4f6; color:#9ca3af !important; border:1px solid #e5e7eb; }
+</style>
+""", unsafe_allow_html=True)
+
 # Função para carregar variáveis do .env
 def load_env_var(key, default=''):
     """Carrega variável do arquivo .env"""
@@ -248,39 +340,21 @@ def extract_publications_from_email(email_body, email_subject):
     """
     publications = []
     
-    # DEBUG: Mostra amostra do email
-    import streamlit as st
-    with st.expander("🔍 DEBUG - Conteúdo do Email", expanded=False):
-        st.text(f"Tamanho total: {len(email_body)} caracteres")
-        st.text(f"Primeiros 1000 caracteres:\n{email_body[:1000]}")
-    
     # Padrão SIMPLES e DIRETO: Publicação seguido de número
-    # Ignora qualquer "Publicação: palavra" pois só queremos números
     pattern = r'Publicação:\s*(\d+)\s+'
     pub_matches = list(re.finditer(pattern, email_body, re.IGNORECASE))
     
-    st.info(f"🔍 Padrão 'Publicação: \\d+' encontrou {len(pub_matches)} matches")
-    
-    if pub_matches and len(pub_matches) > 0:
-        # Encontrou marcadores numerados (Publicação: 1, Publicação: 2, etc)
+    if pub_matches:
         for i, match in enumerate(pub_matches):
-            # Início da publicação
             start_pos = match.start()
-            
-            # Fim da publicação (início da próxima ou fim do texto)
             end_pos = pub_matches[i + 1].start() if i + 1 < len(pub_matches) else len(email_body)
-            
-            # Extrai o conteúdo completo da publicação
             pub_content = email_body[start_pos:end_pos].strip()
             
-            # Procura por "PROCESSO:" primeiro (mais preciso para OAB/RJ)
             process_pattern_marked = r'PROCESSO:\s*(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
             process_match_marked = re.search(process_pattern_marked, pub_content, re.IGNORECASE)
-            
             if process_match_marked:
                 process_number = process_match_marked.group(1)
             else:
-                # Fallback: busca o padrão sem marcador
                 process_pattern = r'(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
                 process_match = re.search(process_pattern, pub_content)
                 process_number = process_match.group(0) if process_match else f'Publicação {match.group(1)}'
@@ -290,75 +364,46 @@ def extract_publications_from_email(email_body, email_subject):
                 'content': pub_content,
                 'source_subject': email_subject
             })
-        
-        st.success(f"✅ Extraídas {len(publications)} publicações usando padrão numerado")
         return publications
     
-    # Se não encontrou "Publicação: N", tenta outros padrões
-    st.warning("⚠️ Padrão 'Publicação: N' não encontrado, tentando 'PROCESSO:'")
-    
-    # Busca por "PROCESSO:" como separador direto
+    # Tenta 'PROCESSO:' como separador
     process_pattern = r'PROCESSO:\s*(\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4})'
     process_matches = list(re.finditer(process_pattern, email_body, re.IGNORECASE))
-    
-    st.info(f"🔍 Padrão 'PROCESSO:' encontrou {len(process_matches)} matches")
-    
     if process_matches:
-        # Encontrou processos com marcador "PROCESSO:"
         for i, match in enumerate(process_matches):
             process_number = match.group(1)
-            # Pega todo o bloco desta publicação
-            start = max(0, match.start() - 200)  # 200 chars antes para pegar cabeçalho
-            # Procura o próximo "PROCESSO:" ou fim do texto
-            if i + 1 < len(process_matches):
-                end = process_matches[i + 1].start()
-            else:
-                end = len(email_body)
-            
+            start = max(0, match.start() - 200)
+            end = process_matches[i + 1].start() if i + 1 < len(process_matches) else len(email_body)
             pub_content = email_body[start:end].strip()
-            
             publications.append({
                 'process_number': process_number,
                 'content': pub_content,
                 'source_subject': email_subject
             })
-        
-        st.success(f"✅ Extraídas {len(publications)} publicações usando 'PROCESSO:'")
         return publications
     
-    # Fallback final: busca padrão de processo sem marcador
-    st.warning("⚠️ 'PROCESSO:' não encontrado, buscando padrão direto de processo")
-    
+    # Fallback: padrão direto de processo
     process_pattern_simple = r'\d{7}-\d{2}\.\d{4}\.\d+\.\d{2}\.\d{4}'
     process_matches_simple = list(re.finditer(process_pattern_simple, email_body))
-    
-    st.info(f"🔍 Padrão direto encontrou {len(process_matches_simple)} matches")
-    
     if process_matches_simple:
         for match in process_matches_simple:
             process_number = match.group(0)
-            # Pega contexto ao redor
             start = max(0, match.start() - 200)
             end = min(len(email_body), match.end() + 1500)
             pub_content = email_body[start:end].strip()
-            
             publications.append({
                 'process_number': process_number,
                 'content': pub_content,
                 'source_subject': email_subject
             })
-        
-        st.success(f"✅ Extraídas {len(publications)} publicações por padrão direto")
         return publications
     
-    # Não encontrou nada
-    st.error("❌ Nenhum padrão encontrado - tratando como publicação única")
+    # Nenhum padrão encontrado — trata como publicação única
     publications.append({
         'process_number': 'Sem número identificado',
         'content': email_body[:5000],
         'source_subject': email_subject
     })
-    
     return publications
 
 # Função para extrair nomes das partes de uma publicação
@@ -520,9 +565,6 @@ def list_meistertask_tasks(section_id, api_token):
             if response.status_code == 200:
                 tasks = response.json()
                 
-                # Debug: mostra quantas tarefas vieram nesta página
-                st.info(f"📄 Página {page}: {len(tasks)} tarefas recuperadas (offset: {offset})")
-                
                 # Se não retornou tarefas, chegamos ao fim
                 if not tasks or len(tasks) == 0:
                     break
@@ -538,7 +580,6 @@ def list_meistertask_tasks(section_id, api_token):
                 
                 # Proteção contra loop infinito
                 if page > 20:  # Máximo 1000 tarefas (20 páginas x 50)
-                    st.warning("⚠️ Limite de páginas atingido. Se houver mais tarefas, elas não foram carregadas.")
                     break
             
             elif response.status_code == 404:
@@ -591,7 +632,6 @@ O token de API está inválido ou expirado.
                     error_msg = response.text[:200]
                 return False, f"❌ Erro HTTP {response.status_code}: {error_msg}"
         
-        st.success(f"✅ Total de tarefas carregadas: {len(all_tasks)} (de {page} página(s))")
         return True, all_tasks
             
     except requests.exceptions.Timeout:
@@ -722,7 +762,6 @@ def find_duplicate_tasks(tasks, only_unassigned=True):
     # Primeiro, filtra tarefas sem responsável se solicitado
     if only_unassigned:
         filtered_tasks = [task for task in tasks if not task.get('assigned_to_id')]
-        st.info(f"🔍 Filtro aplicado: {len(filtered_tasks)} tarefas sem responsável (de {len(tasks)} totais)")
     else:
         filtered_tasks = tasks
     
@@ -754,921 +793,541 @@ def find_duplicate_tasks(tasks, only_unassigned=True):
     # Filtra APENAS processos que têm MAIS DE UMA tarefa
     duplicates = {k: v for k, v in process_dict.items() if len(v) > 1}
     
-    # Debug detalhado
-    st.info(f"📊 Estatísticas:")
-    st.write(f"- Total de tarefas analisadas: **{len(filtered_tasks)}**")
-    st.write(f"- Tarefas com número de processo válido: **{len(seen_task_ids)}**")
-    st.write(f"- Tarefas sem número de processo: **{len(tasks_without_process)}**")
-    st.write(f"- Processos únicos encontrados: **{len(process_dict)}**")
-    st.write(f"- Processos com duplicatas (2+ tarefas): **{len(duplicates)}**")
-    
-    if tasks_without_process:
-        with st.expander("⚠️ Ver tarefas sem número de processo (não serão processadas)"):
-            for t in tasks_without_process[:10]:  # Mostra primeiras 10
-                st.text(f"- {t}")
-            if len(tasks_without_process) > 10:
-                st.text(f"... e mais {len(tasks_without_process) - 10} tarefas")
-    
     return duplicates
 # =============================================================================
-# INTERFACE PRINCIPAL
+# SESSION STATE — navegação por páginas
 # =============================================================================
+if 'page' not in st.session_state:
+    st.session_state.page = 'home'  # home | source_select | flow | duplicatas
+if 'fonte_dados' not in st.session_state:
+    st.session_state.fonte_dados = None  # 'Gmail' | 'DJNE'
+if 'current_step' not in st.session_state:
+    st.session_state.current_step = 1
+if 'filtered_emails' not in st.session_state:
+    st.session_state.filtered_emails = []
+if 'selected_email_ids' not in st.session_state:
+    st.session_state.selected_email_ids = []
+if 'extracted_publications' not in st.session_state:
+    st.session_state.extracted_publications = []
+if 'selected_publication_ids' not in st.session_state:
+    st.session_state.selected_publication_ids = []
+if 'task_creation_results' not in st.session_state:
+    st.session_state.task_creation_results = None
+if 'found_tasks' not in st.session_state:
+    st.session_state.found_tasks = None
+if 'found_duplicates' not in st.session_state:
+    st.session_state.found_duplicates = None
+if 'filters' not in st.session_state:
+    st.session_state.filters = {
+        'text_search': '',
+        'date_from': None,
+        'date_to': None,
+        'read_status': 'unread'
+    }
 
-st.title("📧 Sistema de Automação Gmail → MeisterTask")
-st.markdown("**Validação Manual em Múltiplas Etapas**")
-
-# Sidebar - Navegação e Status
-with st.sidebar:
-    st.header("🎯 Modo de Operação")
-    
-    mode = st.radio(
-        "Escolha o que deseja fazer:",
-        options=['criar_tarefas', 'gerenciar_duplicatas'],
-        format_func=lambda x: '➕ Criar Novas Tarefas' if x == 'criar_tarefas' else '🔍 Gerenciar Duplicatas',
-        index=0 if st.session_state.app_mode == 'criar_tarefas' else 1,
-        key='mode_selector'
-    )
-    
-    # Se mudou o modo, atualiza e reinicia
-    if mode != st.session_state.app_mode:
-        st.session_state.app_mode = mode
-        st.session_state.current_step = 1
-        st.session_state.tasks_to_delete = []
-        st.rerun()
-    
-    st.markdown("---")
-    
-    if st.session_state.app_mode == 'criar_tarefas':
-        st.header("📍 Etapas do Processo")
-        
-        # Indicador visual de progresso
-        steps = [
-            ("1️⃣", "Filtrar Emails", 1),
-            ("2️⃣", "Selecionar Emails", 2),
-            ("3️⃣", "Validar Publicações", 3),
-            ("4️⃣", "Gerar Tarefas", 4)
-        ]
-        
-        for icon, name, step_num in steps:
-            if st.session_state.current_step == step_num:
-                st.markdown(f"**{icon} {name}** ✓")
-            elif st.session_state.current_step > step_num:
-                st.markdown(f"~~{icon} {name}~~ ✅")
-            else:
-                st.markdown(f"{icon} {name}")
-        
-        st.markdown("---")
-    
-    # Status do Gmail
-    st.header("📊 Status")
-    gmail_connected = os.path.exists('token.pickle')
-    st.metric("Gmail", "✅ Conectado" if gmail_connected else "❌ Desconectado")
-    
-    if not gmail_connected:
-        st.warning("⚠️ Execute autenticação do Gmail primeiro")
-    
-    st.markdown("---")
-    
-    # Botões de navegação
-    st.header("🎮 Controles")
-    
-    if st.button("🔄 Reiniciar Processo", use_container_width=True, key="sidebar_reset"):
+def go(page, reset_flow=False):
+    st.session_state.page = page
+    if reset_flow:
         st.session_state.current_step = 1
         st.session_state.filtered_emails = []
         st.session_state.selected_email_ids = []
         st.session_state.extracted_publications = []
         st.session_state.selected_publication_ids = []
         st.session_state.task_creation_results = None
-        st.session_state.tasks_to_delete = []
-        st.rerun()
+        st.session_state.fonte_dados = None
+    st.rerun()
 
-st.markdown("---")
-
-# =============================================================================
-# ETAPA 1: FILTRAR EMAILS
-# =============================================================================
-
-if st.session_state.current_step == 1:
-    st.header("1️⃣ Buscar Publicações")
-    
-    # Escolha da fonte de dados
-    st.subheader("📊 Fonte de Dados")
-    fonte = st.radio(
-        "Escolha onde buscar as publicações:",
-        options=['Gmail', 'DJNE'],
-        horizontal=True,
-        help="Gmail: busca em emails recebidos | DJNE: busca direta no Diário de Justiça Eletrônico Nacional"
-    )
-    st.session_state.fonte_dados = fonte
-    
-    st.markdown("---")
-    
-    # Filtros baseados na fonte escolhida
-    if fonte == 'Gmail':
-        st.subheader("🔍 Filtros de Email")
-    else:
-        st.subheader("🔍 Filtros de Busca DJNE")
-    
-    col1, col2, col3 = st.columns(3)
-    col1, col2, col3 = st.columns(3)
-    
-    if fonte == 'Gmail':
-        with col1:
-            st.subheader("🔍 Texto")
-            text_search = st.text_input(
-                "Buscar no assunto ou corpo",
-                value=st.session_state.filters.get('text_search', ''),
-                placeholder="Ex: intimação, publicação, processo"
-            )
-        
-        with col2:
-            st.subheader("📅 Data de Recebimento")
-            date_from = st.date_input(
-                "De:",
-                value=st.session_state.filters.get('date_from') or (datetime.now() - timedelta(days=7)).date()
-            )
-            date_to = st.date_input(
-                "Até:",
-                value=st.session_state.filters.get('date_to') or datetime.now().date()
-            )
-        
-        with col3:
-            st.subheader("📬 Status")
-            read_status = st.radio(
-                "Mostrar emails:",
-                options=['unread', 'read', 'all'],
-                format_func=lambda x: {
-                    'unread': '📭 Não lidos',
-                    'read': '📬 Lidos',
-                    'all': '📧 Todos'
-                }[x],
-                index=['unread', 'read', 'all'].index(st.session_state.filters.get('read_status', 'unread'))
-            )
-    else:  # DJNE
-        text_search = ''
-        read_status = 'all'
-        
-        with col1:
-            st.info(f"👤 **Advogado:** {load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')}")
-        
-        with col2:
-            st.subheader("📅 Data da Publicação")
-            date_from = st.date_input(
-                "De:",
-                value=st.session_state.filters.get('date_from') or datetime.now().date()
-            )
-            date_to = st.date_input(
-                "Até:",
-                value=st.session_state.filters.get('date_to') or datetime.now().date()
-            )
-        
-        with col3:
-            st.info("ℹ️ A busca será feita diretamente no site do DJNE")
-    
-    st.markdown("---")
-    
-    # Botão Aplicar Filtros
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        btn_text = "🔍 BUSCAR NO GMAIL" if fonte == 'Gmail' else "🔍 BUSCAR NO DJNE"
-        if st.button(btn_text, use_container_width=True, type="primary"):
-            # Atualiza filtros (armazena datas como objetos date, não strings)
-            st.session_state.filters = {
-                'text_search': text_search,
-                'date_from': date_from,
-                'date_to': date_to,
-                'read_status': read_status
-            }
-            
-            if fonte == 'Gmail':
-                # Busca emails no Gmail
-                with st.spinner("Buscando emails no Gmail..."):
-                    gmail_service = get_gmail_service()
-                    if gmail_service:
-                        emails = search_emails(gmail_service, st.session_state.filters)
-                        st.session_state.filtered_emails = emails
-                        
-                        if emails:
-                            st.success(f"✅ {len(emails)} emails encontrados!")
-                            time.sleep(1)
-                            st.session_state.current_step = 2
-                            st.rerun()
-                        else:
-                            st.warning("Nenhum email encontrado com esses filtros.")
-                    else:
-                        st.error("❌ Erro ao conectar com Gmail. Verifique a autenticação.")
-            else:  # DJNE
-                # Busca publicações no DJNE
-                with st.spinner("Buscando publicações no DJNE..."):
-                    try:
-                        nome_advogado = load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')
-                        st.info(f"🔍 Buscando por: {nome_advogado}")
-                        st.info(f"📅 Período: {date_from.strftime('%d/%m/%Y')} até {date_to.strftime('%d/%m/%Y')}")
-                        
-                        publicacoes = buscar_publicacoes_djne(nome_advogado, date_from, date_to)
-                        
-                        st.info(f"📦 Publicações retornadas: {len(publicacoes)}")
-                        
-                        # Converte publicações DJNE para formato compatível com emails
-                        # Pula direto para a etapa 3 (publicações já extraídas)
-                        for idx, pub in enumerate(publicacoes):
-                            pub['email_id'] = f"djne_{idx}"
-                            pub['email_subject'] = pub.get('source_subject', f"DJNE - {pub.get('process_number', 'Sem número')}")
-                            pub['email_sender'] = 'DJNE'
-                            pub['email_date'] = pub.get('data_disponibilizacao', '')
-                            pub['pub_id'] = f"djne_{idx}"
-                            pub['origem'] = 'DJNE'
-                        
-                        st.session_state.extracted_publications = publicacoes
-                        st.session_state.data_source = 'djne'
-                        
-                        if publicacoes:
-                            st.success(f"✅ {len(publicacoes)} publicações encontradas no DJNE!")
-                            st.info(f"🔄 Avançando para etapa 3 (validação)")
-                            time.sleep(2)
-                            st.session_state.current_step = 3  # Pula direto para validação
-                            st.rerun()
-                        else:
-                            st.warning("Nenhuma publicação encontrada no DJNE para este período.")
-                    except Exception as e:
-                        st.error(f"❌ Erro ao buscar no DJNE: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
+# Helper: botão de voltar ao início (sidebar minimalista)
+def render_sidebar_back():
+    with st.sidebar:
+        if st.button('← Início', use_container_width=True):
+            go('home', reset_flow=True)
 
 # =============================================================================
-# ETAPA 2: SELECIONAR EMAILS
+# PÁGINA: HOME
 # =============================================================================
+if st.session_state.page == 'home':
+    # Centraliza o conteúdo
+    st.markdown('<div style="height:3rem"></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align:center; margin-bottom:2.5rem;">
+        <h1 style="font-size:2rem; font-weight:700; color:#111827; margin:0;">📧 Gmail → MeisterTask</h1>
+        <p style="color:#6b7280; margin-top:6px;">O que você quer fazer hoje?</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-elif st.session_state.current_step == 2:
-    st.header("2️⃣ Selecionar Emails para Processar")
-    
-    st.info(f"📊 Total encontrado: **{len(st.session_state.filtered_emails)}**")
-    
-    # Exibir filtros aplicados
-    with st.expander("🔍 Filtros Aplicados"):
-        filters = st.session_state.filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.write("**Texto:**", filters.get('text_search') or "Nenhum")
-        with col2:
-            date_from_str = filters.get('date_from').strftime('%Y/%m/%d') if filters.get('date_from') else 'Início'
-            date_to_str = filters.get('date_to').strftime('%Y/%m/%d') if filters.get('date_to') else 'Hoje'
-            st.write("**Período:**", f"{date_from_str} até {date_to_str}")
-        with col3:
-            st.write("**Status:**", {
-                'unread': 'Não lidos',
-                'read': 'Lidos',
-                'all': 'Todos'
-            }.get(filters.get('read_status'), 'Não lidos'))
-    
-    st.markdown("---")
-    
-    # Lista de emails com preview
-    for idx, email in enumerate(st.session_state.filtered_emails):
-        with st.expander(
-            f"{'✉️' if not email['is_read'] else '📬'} **{email['subject'][:80]}...** - {email['sender'][:50]}",
-            expanded=False
-        ):
-            col1, col2 = st.columns([3, 1])
-            
-            with col1:
-                st.markdown(f"**De:** {email['sender']}")
-                st.markdown(f"**Data:** {email['date']}")
-                st.markdown(f"**Status:** {'Não lido' if not email['is_read'] else 'Lido'}")
-                st.markdown("**Conteúdo:**")
-                
-                # Mostrar preview do corpo (primeiros 500 caracteres)
-                body_preview = email['body'][:500] + "..." if len(email['body']) > 500 else email['body']
-                st.text_area(
-                    "Corpo do email",
-                    value=body_preview,
-                    height=200,
-                    key=f"body_{email['id']}",
-                    disabled=True
-                )
-                
-            with col2:
-                # Checkbox para seleção
-                is_selected = st.checkbox(
-                    "Selecionar",
-                    value=email['id'] in st.session_state.selected_email_ids,
-                    key=f"select_{email['id']}"
-                )
-                
-                if is_selected and email['id'] not in st.session_state.selected_email_ids:
-                    st.session_state.selected_email_ids.append(email['id'])
-                elif not is_selected and email['id'] in st.session_state.selected_email_ids:
-                    st.session_state.selected_email_ids.remove(email['id'])
-    
-    st.markdown("---")
-    
-    # Botões de navegação
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
-    
-    
+    col_l, col1, col2, col_r = st.columns([1, 2, 2, 1])
+
     with col1:
-        if st.button("🏠", use_container_width=True, key="home_step2", help="Voltar ao Início"):
-            st.session_state.current_step = 1
-            st.rerun()
+        st.markdown("""
+        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                    padding:2rem; text-align:center; height:180px;
+                    display:flex; flex-direction:column; justify-content:center; gap:12px;">
+            <div style="font-size:2.5rem;">➕</div>
+            <div style="font-size:1.1rem; font-weight:700; color:#111827;">Criar Tarefas</div>
+            <div style="font-size:0.82rem; color:#6b7280;">Importar publicações e gerar tarefas no MeisterTask</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        if st.button('Criar Tarefas', use_container_width=True, type='primary', key='btn_criar'):
+            go('source_select', reset_flow=True)
+
     with col2:
-        if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
-            st.session_state.current_step = 1
-            st.rerun()
-    
-    with col3:
-        selected_count = len(st.session_state.selected_email_ids)
-        if st.button(
-            f"📤 EXTRAIR PUBLICAÇÕES ({selected_count} selecionados)",
-            use_container_width=True,
-            type="primary",
-            disabled=selected_count == 0
-        ):
-            with st.spinner("Extraindo publicações..."):
-                publications = []
-                
-                for email in st.session_state.filtered_emails:
-                    if email['id'] in st.session_state.selected_email_ids:
-                        # Se for DJNE, o email já É a publicação
-                        if email.get('origem') == 'DJNE':
-                            pub_data = email.get('raw_data', {})
-                            publications.append({
-                                'process_number': pub_data.get('process_number', 'Não identificado'),
-                                'content': email['body'],
-                                'source_subject': email['subject'],
-                                'email_id': email['id'],
-                                'email_subject': email['subject'],
-                                'email_sender': email['sender'],
-                                'email_date': email['date'],
-                                'pub_id': email['id'],
-                                'origem': 'DJNE',
-                                'orgao': pub_data.get('orgao', ''),
-                                'tribunal': pub_data.get('tribunal', ''),
-                                'tipo_comunicacao': pub_data.get('tipo_comunicacao', '')
-                            })
-                        else:
-                            # Gmail: extrai publicações do email
-                            st.info(f"📧 Processando email: {email['subject'][:50]}...")
-                            st.info(f"📏 Tamanho do corpo: {len(email['body'])} caracteres")
-                            
-                            # Mostra preview do conteúdo
-                            with st.expander("👁️ VER CONTEÚDO DO EMAIL", expanded=True):
-                                st.text(email['body'][:2000])
-                            
-                            email_pubs = extract_publications_from_email(email['body'], email['subject'])
-                            
-                            # Adiciona metadados
-                            for pub in email_pubs:
-                                pub['email_id'] = email['id']
-                                pub['email_subject'] = email['subject']
-                                pub['email_sender'] = email['sender']
-                                pub['email_date'] = email['date']
-                                pub['pub_id'] = f"{email['id']}_{len(publications)}"
-                                pub['origem'] = 'Gmail'
-                                publications.append(pub)
-                
-                st.session_state.extracted_publications = publications
-                
-                if publications:
-                    st.success(f"✅ {len(publications)} publicações extraídas de {selected_count} emails!")
-                    time.sleep(1)
-                    st.session_state.current_step = 3
-                    st.rerun()
-                else:
-                    st.warning("Nenhuma publicação encontrada nos emails selecionados.")
+        st.markdown("""
+        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                    padding:2rem; text-align:center; height:180px;
+                    display:flex; flex-direction:column; justify-content:center; gap:12px;">
+            <div style="font-size:2.5rem;">🔍</div>
+            <div style="font-size:1.1rem; font-weight:700; color:#111827;">Gerenciar Duplicatas</div>
+            <div style="font-size:0.82rem; color:#6b7280;">Identificar e remover tarefas duplicadas</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        if st.button('Gerenciar Duplicatas', use_container_width=True, key='btn_dup'):
+            go('duplicatas')
 
 # =============================================================================
-# ETAPA 3: VALIDAR PUBLICAÇÕES
+# PÁGINA: ESCOLHA DA FONTE DE DADOS
 # =============================================================================
+elif st.session_state.page == 'source_select':
+    render_sidebar_back()
 
-elif st.session_state.current_step == 3:
-    st.header("3️⃣ Validar e Selecionar Publicações")
-    
-    total_pubs = len(st.session_state.extracted_publications)
-    st.info(f"📋 Total de publicações extraídas: **{total_pubs}**")
-    
-    # Debug
-    if total_pubs == 0:
-        st.warning("⚠️ Nenhuma publicação encontrada no estado da sessão!")
-        st.info("Clique em 'Voltar aos Filtros' para fazer uma nova busca.")
-    else:
-        st.success(f"✅ {total_pubs} publicações carregadas com sucesso")
-    
-    st.markdown("---")
-    
-    # Exibir publicações
-    for idx, pub in enumerate(st.session_state.extracted_publications):
-        # Indicador visual: ✅ se selecionado, 📄 se não
-        is_selected = pub['pub_id'] in st.session_state.selected_publication_ids
-        icon = '✅' if is_selected else '📄'
-        with st.expander(
-            f"{icon} **Processo: {pub['process_number']}** - Email: {pub['email_subject'][:60]}...",
-            expanded=True  # Expandido por padrão
-        ):
-            col1, col2 = st.columns([3, 1])
-            
-            with col1:
-                st.markdown(f"**Número do Processo:** {pub['process_number']}")
-                
-                # Informações específicas do DJNE
-                if pub.get('origem') == 'DJNE':
-                    if pub.get('tribunal'):
-                        st.markdown(f"**Tribunal:** {pub['tribunal']}")
-                    if pub.get('orgao'):
-                        st.markdown(f"**Órgão:** {pub['orgao']}")
-                    if pub.get('tipo_comunicacao'):
-                        st.markdown(f"**Tipo:** {pub['tipo_comunicacao']}")
-                else:
-                    st.markdown(f"**Email de Origem:** {pub['email_subject']}")
-                    st.markdown(f"**Remetente:** {pub['email_sender']}")
-                
-                st.markdown(f"**Data:** {pub['email_date']}")
-                
-                st.markdown("---")
-                st.markdown("**Conteúdo da Publicação:**")
-                
-                # Mostrar conteúdo completo
-                st.text_area(
-                    "Texto da publicação",
-                    value=pub['content'],
-                    height=300,
-                    key=f"pub_content_{pub['pub_id']}",
-                    disabled=True
-                )
-            
-            with col2:
-                # Checkbox para seleção
-                is_selected_pub = st.checkbox(
-                    "Selecionar para gerar tarefa",
-                    value=pub['pub_id'] in st.session_state.selected_publication_ids,
-                    key=f"select_pub_{pub['pub_id']}"
-                )
-                
-                if is_selected_pub and pub['pub_id'] not in st.session_state.selected_publication_ids:
-                    st.session_state.selected_publication_ids.append(pub['pub_id'])
-                elif not is_selected_pub and pub['pub_id'] in st.session_state.selected_publication_ids:
-                    st.session_state.selected_publication_ids.remove(pub['pub_id'])
-    
-    st.markdown("---")
-    
-    # Botões de navegação
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
-    
-    
+    st.markdown('<div style="height:2rem"></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align:center; margin-bottom:2.5rem;">
+        <h1 style="font-size:1.6rem; font-weight:700; color:#111827; margin:0;">De onde vêm as publicações?</h1>
+        <p style="color:#6b7280; margin-top:6px;">Escolha a fonte de dados</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_l, col1, col2, col_r = st.columns([1, 2, 2, 1])
+
     with col1:
-        if st.button("🏠", use_container_width=True, key="home_step3", help="Voltar ao Início"):
+        st.markdown("""
+        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                    padding:2rem; text-align:center; height:160px;
+                    display:flex; flex-direction:column; justify-content:center; gap:10px;">
+            <div style="font-size:2.2rem;">📧</div>
+            <div style="font-size:1.05rem; font-weight:700; color:#111827;">Gmail</div>
+            <div style="font-size:0.80rem; color:#6b7280;">Buscar publicações nos e-mails recebidos</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        if st.button('Usar Gmail', use_container_width=True, type='primary', key='btn_gmail'):
+            st.session_state.fonte_dados = 'Gmail'
             st.session_state.current_step = 1
-            st.rerun()
+            go('flow')
+
     with col2:
-        # Se for DJNE, volta para filtros (etapa 1), senão volta para emails (etapa 2)
-        if st.session_state.get('data_source') == 'djne':
-            if st.button("⬅️ Voltar aos Filtros", use_container_width=True):
+        st.markdown("""
+        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:16px;
+                    padding:2rem; text-align:center; height:160px;
+                    display:flex; flex-direction:column; justify-content:center; gap:10px;">
+            <div style="font-size:2.2rem;">⚖️</div>
+            <div style="font-size:1.05rem; font-weight:700; color:#111827;">DJNE</div>
+            <div style="font-size:0.80rem; color:#6b7280;">Buscar diretamente no Diário de Justiça Eletrônico</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        if st.button('Usar DJNE', use_container_width=True, type='primary', key='btn_djne'):
+            st.session_state.fonte_dados = 'DJNE'
+            st.session_state.current_step = 1
+            go('flow')
+
+# =============================================================================
+# PÁGINA: FLUXO DE CRIAÇÃO DE TAREFAS
+# =============================================================================
+elif st.session_state.page == 'flow':
+    render_sidebar_back()
+    fonte = st.session_state.fonte_dados
+
+    # ── Cabeçalho com progresso ──────────────────────────────────────────────
+    steps_labels = ['Filtrar', 'Selecionar', 'Validar', 'Gerar']
+    current = st.session_state.current_step
+    fonte_icon = '📧' if fonte == 'Gmail' else '⚖️'
+
+    cols_prog = st.columns(4)
+    for i, label in enumerate(steps_labels):
+        step_num = i + 1
+        with cols_prog[i]:
+            if step_num == current:
+                st.markdown(f'<div style="text-align:center; color:#4f6ef7; font-weight:700; font-size:0.85rem; border-bottom:2px solid #4f6ef7; padding-bottom:6px;">▶ {label}</div>', unsafe_allow_html=True)
+            elif step_num < current:
+                st.markdown(f'<div style="text-align:center; color:#10b981; font-size:0.85rem; padding-bottom:6px;">✓ {label}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div style="text-align:center; color:#9ca3af; font-size:0.85rem; padding-bottom:6px;">{label}</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
+
+    # ── ETAPA 1: Filtros ─────────────────────────────────────────────────────
+    if current == 1:
+        st.subheader(f"{fonte_icon} Filtros de Busca — {fonte}")
+        st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
+
+        if fonte == 'Gmail':
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                text_search = st.text_input('Buscar no assunto / corpo',
+                    value=st.session_state.filters.get('text_search', ''),
+                    placeholder='Ex: intimação, publicação...')
+            with col2:
+                date_from = st.date_input('De:', value=st.session_state.filters.get('date_from') or (datetime.now() - timedelta(days=7)).date())
+                date_to   = st.date_input('Até:', value=st.session_state.filters.get('date_to') or datetime.now().date())
+            with col3:
+                read_status = st.radio('Status dos e-mails:', ['unread', 'read', 'all'],
+                    format_func=lambda x: {'unread':'📭 Não lidos','read':'📬 Lidos','all':'📧 Todos'}[x],
+                    index=['unread','read','all'].index(st.session_state.filters.get('read_status','unread')))
+        else:  # DJNE
+            text_search = ''
+            read_status = 'all'
+            nome_adv = load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f'👤 **Advogado:** {nome_adv}')
+            with col2:
+                date_from = st.date_input('De:', value=st.session_state.filters.get('date_from') or datetime.now().date())
+                date_to   = st.date_input('Até:', value=st.session_state.filters.get('date_to') or datetime.now().date())
+
+        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+        _, col_btn, _ = st.columns([2,1,2])
+        with col_btn:
+            btn_label = '🔍 Buscar no Gmail' if fonte == 'Gmail' else '🔍 Buscar no DJNE'
+            if st.button(btn_label, use_container_width=True, type='primary'):
+                st.session_state.filters = {
+                    'text_search': text_search if fonte == 'Gmail' else '',
+                    'date_from': date_from,
+                    'date_to': date_to,
+                    'read_status': read_status if fonte == 'Gmail' else 'all'
+                }
+
+                if fonte == 'Gmail':
+                    with st.spinner('Buscando e-mails...'):
+                        gmail_service = get_gmail_service()
+                        if gmail_service:
+                            emails = search_emails(gmail_service, st.session_state.filters)
+                            st.session_state.filtered_emails = emails
+                            if emails:
+                                st.session_state.current_step = 2
+                                st.rerun()
+                            else:
+                                st.warning('Nenhum e-mail encontrado com esses filtros.')
+                        else:
+                            st.error('❌ Não foi possível conectar ao Gmail. Verifique a autenticação.')
+                else:  # DJNE
+                    with st.spinner('Buscando no DJNE...'):
+                        try:
+                            nome_adv = load_env_var('DJNE_NOME_ADVOGADO', 'EDSON MARCOS FERREIRA PRATTI JUNIOR')
+                            publicacoes = buscar_publicacoes_djne(nome_adv, date_from, date_to)
+                            for idx, pub in enumerate(publicacoes):
+                                pub.update({
+                                    'email_id': f'djne_{idx}',
+                                    'email_subject': pub.get('source_subject', f"DJNE - {pub.get('process_number','')}"),
+                                    'email_sender': 'DJNE',
+                                    'email_date': pub.get('data_disponibilizacao', ''),
+                                    'pub_id': f'djne_{idx}',
+                                    'origem': 'DJNE'
+                                })
+                            st.session_state.extracted_publications = publicacoes
+                            if publicacoes:
+                                st.success(f'✅ {len(publicacoes)} publicações encontradas!')
+                                st.session_state.current_step = 3
+                                time.sleep(0.8)
+                                st.rerun()
+                            else:
+                                st.warning('Nenhuma publicação encontrada para este período.')
+                        except Exception as e:
+                            st.error(f'❌ Erro ao buscar no DJNE: {str(e)}')
+
+    # ── ETAPA 2: Selecionar e-mails ──────────────────────────────────────────
+    elif current == 2:
+        st.subheader(f'📬 Selecione os e-mails ({len(st.session_state.filtered_emails)} encontrados)')
+
+        for email in st.session_state.filtered_emails:
+            icon = '✉️' if not email['is_read'] else '📬'
+            with st.expander(f"{icon} {email['subject'][:90]}  —  {email['sender'][:50]}", expanded=False):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.caption(f"**De:** {email['sender']}   |   **Data:** {email['date']}")
+                    body_preview = email['body'][:500] + '...' if len(email['body']) > 500 else email['body']
+                    st.text_area('Conteúdo', value=body_preview, height=180, key=f"body_{email['id']}", disabled=True)
+                with col2:
+                    selected = st.checkbox('Selecionar', value=email['id'] in st.session_state.selected_email_ids, key=f"sel_{email['id']}")
+                    if selected and email['id'] not in st.session_state.selected_email_ids:
+                        st.session_state.selected_email_ids.append(email['id'])
+                    elif not selected and email['id'] in st.session_state.selected_email_ids:
+                        st.session_state.selected_email_ids.remove(email['id'])
+
+        st.markdown('---')
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button('← Voltar', use_container_width=True):
                 st.session_state.current_step = 1
                 st.rerun()
-        else:
-            if st.button("⬅️ Voltar aos Emails", use_container_width=True):
-                st.session_state.current_step = 2
-                st.rerun()
-    
-    with col3:
-        selected_count = len(st.session_state.selected_publication_ids)
-        if st.button(
-            f"✅ GERAR TAREFAS ({selected_count} selecionadas)",
-            use_container_width=True,
-            type="primary",
-            disabled=selected_count == 0
-        ):
-            st.session_state.current_step = 4
-            st.rerun()
-
-# =============================================================================
-# ETAPA 4: GERAR TAREFAS
-# =============================================================================
-
-elif st.session_state.current_step == 4:
-    st.header("4️⃣ Gerar Tarefas no MeisterTask")
-    
-    # Aviso se não há publicações (página recarregada)
-    if not st.session_state.selected_publication_ids:
-        st.warning("⚠️ Nenhuma publicação selecionada. Você pode ter recarregado a página.")
-        st.info("Clique no botão 'Reiniciar Processo' na barra lateral para começar novamente.")
-        st.stop()
-    
-    selected_pubs = [
-        pub for pub in st.session_state.extracted_publications
-        if pub['pub_id'] in st.session_state.selected_publication_ids
-    ]
-    
-    st.info(f"🎯 **{len(selected_pubs)}** publicações selecionadas para criar tarefas")
-    
-    st.markdown("---")
-    
-    # Preview das tarefas que serão criadas
-    st.subheader("📋 Preview das Tarefas:")
-    
-    for idx, pub in enumerate(selected_pubs, 1):
-        with st.expander(f"{idx}. {pub['process_number']}", expanded=False):
-            # Extrai informações da publicação
-            parties = extract_parties_from_publication(pub['content'])
-            task_title = f"{pub['process_number']} - {parties}"
-            
-            st.markdown(f"**Título da Tarefa:**")
-            st.code(task_title)
-            
-            st.markdown(f"**Partes:** {parties}")
-            st.markdown(f"**Email de Origem:** {pub['email_subject']}")
-            
-            # Preview do conteúdo (primeiros 500 caracteres)
-            content_preview = pub['content'][:500] + "..." if len(pub['content']) > 500 else pub['content']
-            st.text_area(
-                "Preview do Conteúdo (Descrição da Tarefa):",
-                value=content_preview,
-                height=150,
-                disabled=True,
-                key=f"preview_{idx}"
-            )
-    
-    st.markdown("---")
-    
-    # Informações de destino
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info(f"📁 **Projeto:** Edson Pratti Advogados")
-    with col2:
-        st.info(f"📌 **Seção:** Publicações")
-    
-    st.markdown("---")
-    
-    # Botões de ação
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
-    
-    
-    with col1:
-        if st.button("🏠", use_container_width=True, key="home_step4", help="Voltar ao Início"):
-            st.session_state.current_step = 1
-            st.rerun()
-    with col2:
-        btn_voltar = st.button("⬅️ Voltar às Publicações", use_container_width=True, key="btn_back_to_pubs")
-        if btn_voltar:
-            st.session_state.current_step = 3
-            st.rerun()
-    with col3:
-        if st.button(
-            f"🚀 CRIAR {len(selected_pubs)} TAREFAS",
-            use_container_width=True,
-            type="primary"
-        ):
-            # Carrega configurações do .env
-            api_token = load_env_var('MEISTERTASK_API_TOKEN')
-            section_id = load_env_var('MEISTERTASK_SECTION_ID')
-            
-            # Debug: mostra configurações (parcialmente)
-            st.info(f"🔑 API Token: {'✅ Configurado' if api_token else '❌ Não encontrado'}")
-            st.info(f"📌 Section ID: {section_id if section_id else '❌ Não encontrado'}")
-            
-            if not api_token or not section_id:
-                st.error("❌ Erro: MEISTERTASK_API_TOKEN ou MEISTERTASK_SECTION_ID não configurados no arquivo .env")
-                st.stop()
-            
-            # Container para resultados que não desaparecem
-            results_container = st.container()
-            
-            # Barra de progresso
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            success_count = 0
-            error_count = 0
-            errors = []
-            success_tasks = []
-            
-            for idx, pub in enumerate(selected_pubs):
-                # Atualiza progresso
-                progress = (idx + 1) / len(selected_pubs)
-                progress_bar.progress(progress)
-                status_text.text(f"Criando tarefa {idx + 1} de {len(selected_pubs)}: {pub['process_number']}")
-                
-                # Extrai informações
-                parties = extract_parties_from_publication(pub['content'])
-                
-                # Cria tarefa no MeisterTask
-                success, result = create_meistertask_task(
-                    process_number=pub['process_number'],
-                    parties=parties,
-                    description=pub['content'],
-                    section_id=section_id,
-                    api_token=api_token
-                )
-                
-                if success:
-                    success_count += 1
-                    success_tasks.append(pub['process_number'])
-                else:
-                    error_count += 1
-                    error_msg = f"{pub['process_number']}: {result}"
-                    errors.append(error_msg)
-                
-                time.sleep(0.5)  # Evita rate limiting
-            
-            # Limpa barra de progresso
-            progress_bar.empty()
-            status_text.empty()
-            
-            # Salva resultados no session state para não desaparecerem
-            st.session_state.task_creation_results = {
-                'success_count': success_count,
-                'error_count': error_count,
-                'errors': errors,
-                'success_tasks': success_tasks
-            }
-    
-    # Mostra resultados salvos (persistem na tela)
-    if st.session_state.task_creation_results:
-        results = st.session_state.task_creation_results
-        
-        st.markdown("---")
-        st.subheader("📊 Resultado da Criação de Tarefas:")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.success(f"✅ **{results['success_count']}** tarefas criadas com sucesso!")
-            if results['success_tasks']:
-                with st.expander("Ver tarefas criadas"):
-                    for task in results['success_tasks']:
-                        st.text(f"✓ {task}")
-        
-        with col2:
-            if results['error_count'] > 0:
-                st.error(f"❌ **{results['error_count']}** erros")
-                with st.expander("⚠️ VER DETALHES DOS ERROS (CLIQUE AQUI)", expanded=True):
-                    for error in results['errors']:
-                        st.code(error, language=None)
-        
-        # Botões de navegação após conclusão
-        st.markdown("---")
-        st.success("🎉 Processo concluído! Use o botão abaixo para iniciar um novo processo.")
-        
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("🏠 VOLTAR AO INÍCIO", use_container_width=True, type="primary", key="reset_all"):
-                # Limpa todos os estados
-                for key in ['current_step', 'filtered_emails', 'selected_email_ids', 
-                           'extracted_publications', 'selected_publication_ids', 'task_creation_results']:
-                    if key in st.session_state:
-                        if key == 'current_step':
-                            st.session_state[key] = 1
-                        else:
-                            st.session_state[key] = [] if key != 'task_creation_results' else None
-                
-                st.success("✅ Sistema reiniciado!")
-                time.sleep(0.5)
-                st.rerun()
-
-# =============================================================================
-# MODO: GERENCIAR DUPLICATAS
-# =============================================================================
-
-if st.session_state.app_mode == 'gerenciar_duplicatas':
-    st.title("🔍 Gerenciamento de Tarefas Duplicadas")
-    st.markdown("Esta ferramenta identifica e permite excluir tarefas duplicadas na seção **Publicações** do MeisterTask.")
-    st.markdown("**Critério:** Tarefas com o mesmo número de processo são consideradas duplicatas.")
-    st.markdown("---")
-    
-    # Carregar credenciais
-    api_token = load_env_var('MEISTERTASK_API_TOKEN')
-    section_id = load_env_var('MEISTERTASK_SECTION_ID')
-    
-    # Verificação e exibição das credenciais
-    col1, col2 = st.columns(2)
-    with col1:
-        if api_token:
-            st.success(f"🔑 API Token: Configurado (`...{api_token[-8:]}`)")
-        else:
-            st.error("🔑 API Token: ❌ Não configurado")
-    with col2:
-        if section_id:
-            st.success(f"📌 Section ID: `{section_id}`")
-        else:
-            st.error("📌 Section ID: ❌ Não configurado")
-    
-    if not api_token or not section_id:
-        st.error("❌ **Configuração incompleta**")
-        st.markdown("""
-        **Como configurar:**
-        
-        1. Crie ou edite o arquivo `.env` na raiz do projeto
-        2. Adicione as seguintes linhas:
-        
-        ```
-        MEISTERTASK_API_TOKEN=seu_token_aqui
-        MEISTERTASK_SECTION_ID=id_da_secao_aqui
-        ```
-        
-        **Para obter o API Token:**
-        - Acesse: [MeisterTask Account Settings → Developer](https://www.meistertask.com/app/settings/developer)
-        - Clique em "Generate New Token"
-        - Copie o token gerado
-        
-        **Para obter o Section ID:**
-        - Abra o MeisterTask no navegador
-        - Navegue até a seção "Publicações" (ou a seção desejada)
-        - Copie o número que aparece na URL após `/sections/`
-        - Exemplo: `https://www.meistertask.com/app/section/12345678` → Section ID = `12345678`
-        """)
-        st.stop()
-    
-    st.markdown("---")
-    
-    # Botão para buscar tarefas
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🔄 Buscar Tarefas da Seção Publicações", use_container_width=True, type="primary"):
-            with st.spinner("🔍 Buscando tarefas..."):
-                success, result = list_meistertask_tasks(section_id, api_token)
-                
-                if success:
-                    tasks = result
-                    st.success(f"✅ {len(tasks)} tarefas encontradas!")
-                    
-                    # Armazenar no session_state
-                    st.session_state.found_tasks = tasks
-                    
-                    # Identificar duplicatas
-                    duplicates = find_duplicate_tasks(tasks)
-                    st.session_state.found_duplicates = duplicates
-                    
-                else:
-                    st.error(f"❌ Erro ao buscar tarefas: {result}") 
-    
-    # Mostrar duplicatas se existirem no session_state
-    if st.session_state.found_duplicates:
-        duplicates = st.session_state.found_duplicates
-        st.warning(f"⚠️ Encontradas {len(duplicates)} processos com tarefas duplicadas!")
-        
-        # Mostrar duplicatas
-        st.markdown("---")
-        st.subheader("📋 Tarefas Duplicadas Encontradas")
-        st.info("✓ Marque as tarefas que deseja **MANTER** (as desmarcadas serão excluídas)")
-        
-        # Lista para armazenar IDs das tarefas a manter
-        tasks_to_keep = []
-        
-        for process_idx, (process_num, task_list) in enumerate(duplicates.items()):
-            with st.expander(f"📂 Processo: **{process_num}** ({len(task_list)} duplicatas)", expanded=True):
-                st.warning(f"⚠️ **ATENÇÃO**: Revise cuidadosamente se estas {len(task_list)} tarefas são REALMENTE duplicatas do mesmo processo!")
-                st.markdown(f"**Encontradas {len(task_list)} tarefas para o mesmo processo:**")
-                
-                # Mostrar cada tarefa duplicada
-                for idx, task in enumerate(task_list, 1):
-                    task_id = task.get('id')
-                    task_name = task.get('name', 'Sem nome')
-                    task_created = task.get('created_at', 'Data desconhecida')
-                    task_status = task.get('status', 'Sem status')
-                    
-                    # Cria uma coluna para checkbox e informações
-                    col_check, col_info = st.columns([1, 9])
-                    
-                    with col_check:
-                        # Por padrão, marca a primeira tarefa (mais antiga) para manter
-                        # Chave única: processo_idx + idx + task_id para garantir unicidade absoluta
-                        keep_task = st.checkbox(
-                            "Manter",
-                            value=(idx == 1),  # Marca primeira por padrão
-                            key=f"keep_{process_idx}_{idx}_{task_id}",
-                            label_visibility="collapsed"
-                        )
-                        
-                        if keep_task:
-                            tasks_to_keep.append(task_id)
-                    
-                    with col_info:
-                        st.markdown(f"""
-                        **Tarefa {idx}:**
-                        - 📝 **Nome COMPLETO:** `{task_name}`
-                        - 🆔 **ID:** {task_id}
-                        - 📅 **Criada em:** {task_created[:10] if len(task_created) > 10 else task_created}
-                        - 📊 **Status:** {task_status}
-                        """)
-                
-                st.markdown("---")
-        
-        # Calcular tarefas a excluir
-        all_duplicate_ids = [task['id'] for task_list in duplicates.values() for task in task_list]
-        tasks_to_delete = [tid for tid in all_duplicate_ids if tid not in tasks_to_keep]
-        
-        # Mostrar resumo
-        st.markdown("---")
-        st.subheader("📊 Resumo da Operação")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total de Duplicatas", len(all_duplicate_ids))
-        with col2:
-            st.metric("Tarefas a Manter", len(tasks_to_keep), delta=None, delta_color="off")
         with col3:
-            st.metric("Tarefas a Excluir", len(tasks_to_delete), delta=f"-{len(tasks_to_delete)}", delta_color="inverse")
-        
-        # Botão de confirmação para excluir
-        if tasks_to_delete:
-            st.markdown("---")
-            st.warning(f"⚠️ **ATENÇÃO:** Você está prestes a excluir **{len(tasks_to_delete)} tarefas**. Esta ação não pode ser desfeita!")
-            
-            col1, col2, col3 = st.columns([1, 2, 1])
+            n = len(st.session_state.selected_email_ids)
+            if st.button(f'📤 Extrair publicações ({n} selecionados)', use_container_width=True, type='primary', disabled=n == 0):
+                with st.spinner('Extraindo publicações...'):
+                    publications = []
+                    for email in st.session_state.filtered_emails:
+                        if email['id'] in st.session_state.selected_email_ids:
+                            email_pubs = extract_publications_from_email(email['body'], email['subject'])
+                            for pub in email_pubs:
+                                pub.update({
+                                    'email_id': email['id'],
+                                    'email_subject': email['subject'],
+                                    'email_sender': email['sender'],
+                                    'email_date': email['date'],
+                                    'pub_id': f"{email['id']}_{len(publications)}",
+                                    'origem': 'Gmail'
+                                })
+                                publications.append(pub)
+                    st.session_state.extracted_publications = publications
+                    if publications:
+                        st.session_state.current_step = 3
+                        st.rerun()
+                    else:
+                        st.warning('Nenhuma publicação encontrada nos e-mails selecionados.')
+
+    # ── ETAPA 3: Validar publicações ─────────────────────────────────────────
+    elif current == 3:
+        pubs = st.session_state.extracted_publications
+        st.subheader(f'📋 Validar publicações ({len(pubs)} encontradas)')
+
+        for pub in pubs:
+            is_sel = pub['pub_id'] in st.session_state.selected_publication_ids
+            icon = '✅' if is_sel else '📄'
+            with st.expander(f"{icon} {pub['process_number']}  —  {pub.get('email_subject','')[:60]}", expanded=False):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.caption(f"**Data:** {pub.get('email_date','')}  |  **Origem:** {pub.get('origem','')}")
+                    if pub.get('origem') == 'DJNE':
+                        if pub.get('tribunal'): st.caption(f"**Tribunal:** {pub['tribunal']}")
+                        if pub.get('orgao'):    st.caption(f"**Órgão:** {pub['orgao']}")
+                    st.text_area('Conteúdo', value=pub['content'], height=250,
+                                 key=f"pc_{pub['pub_id']}", disabled=True)
+                with col2:
+                    sel = st.checkbox('Incluir', value=is_sel, key=f"sp_{pub['pub_id']}")
+                    if sel and pub['pub_id'] not in st.session_state.selected_publication_ids:
+                        st.session_state.selected_publication_ids.append(pub['pub_id'])
+                    elif not sel and pub['pub_id'] in st.session_state.selected_publication_ids:
+                        st.session_state.selected_publication_ids.remove(pub['pub_id'])
+
+        st.markdown('---')
+        volta_passo = 1 if st.session_state.fonte_dados == 'DJNE' else 2
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button('← Voltar', use_container_width=True):
+                st.session_state.current_step = volta_passo
+                st.rerun()
+        with col3:
+            n = len(st.session_state.selected_publication_ids)
+            if st.button(f'✅ Gerar tarefas ({n} selecionadas)', use_container_width=True, type='primary', disabled=n == 0):
+                st.session_state.current_step = 4
+                st.rerun()
+
+    # ── ETAPA 4: Gerar tarefas ───────────────────────────────────────────────
+    elif current == 4:
+        selected_pubs = [
+            p for p in st.session_state.extracted_publications
+            if p['pub_id'] in st.session_state.selected_publication_ids
+        ]
+
+        if not selected_pubs:
+            st.warning('Nenhuma publicação selecionada.')
+            if st.button('← Voltar'):
+                st.session_state.current_step = 3
+                st.rerun()
+        else:
+            st.subheader(f'🚀 Gerar {len(selected_pubs)} tarefa(s) no MeisterTask')
+
+            with st.expander('Preview das tarefas', expanded=False):
+                for i, pub in enumerate(selected_pubs, 1):
+                    parties = extract_parties_from_publication(pub['content'])
+                    st.code(f"{i}. {pub['process_number']} — {parties}")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info('📁 **Projeto:** Edson Pratti Advogados')
             with col2:
-                confirm_delete = st.checkbox("✅ Confirmo que quero excluir as tarefas desmarcadas", key="confirm_delete")
-                
-                if confirm_delete:
-                    if st.button("🗑️ EXCLUIR TAREFAS SELECIONADAS", use_container_width=True, type="primary"):
-                        # Executar exclusão
-                        st.markdown("---")
-                        st.subheader("🔄 Excluindo Tarefas...")
-                        
+                st.info('📌 **Seção:** Publicações')
+
+            st.markdown('---')
+            col_back, col_act = st.columns([1, 2])
+            with col_back:
+                if st.button('← Voltar', use_container_width=True):
+                    st.session_state.current_step = 3
+                    st.rerun()
+            with col_act:
+                if st.button(f'🚀 Criar {len(selected_pubs)} tarefa(s)', use_container_width=True, type='primary'):
+                    api_token  = load_env_var('MEISTERTASK_API_TOKEN')
+                    section_id = load_env_var('MEISTERTASK_SECTION_ID')
+
+                    if not api_token or not section_id:
+                        st.error('❌ Configure MEISTERTASK_API_TOKEN e MEISTERTASK_SECTION_ID no arquivo .env')
+                    else:
                         progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        success_count = 0
-                        already_deleted_count = 0
-                        error_count = 0
-                        errors = []
-                        success_messages = []
-                        
-                        for idx, task_id in enumerate(tasks_to_delete, 1):
-                            status_text.text(f"Excluindo tarefa {idx} de {len(tasks_to_delete)}...")
-                            progress_bar.progress(idx / len(tasks_to_delete))
-                            
-                            success, message = delete_meistertask_task(task_id, api_token)
-                            
-                            if success:
-                                # Verifica se já estava deletada (404)
-                                if "404" in message or "já estava deletada" in message or "já estava na lixeira" in message:
-                                    already_deleted_count += 1
-                                    success_messages.append(f"⚠️ {message}")
-                                else:
-                                    success_count += 1
-                                    success_messages.append(f"✓ {message}")
+                        status_text  = st.empty()
+                        success_count, error_count = 0, 0
+                        errors, success_tasks = [], []
+
+                        for idx, pub in enumerate(selected_pubs):
+                            progress_bar.progress((idx + 1) / len(selected_pubs))
+                            status_text.text(f'Criando {idx+1}/{len(selected_pubs)}: {pub["process_number"]}')
+                            parties = extract_parties_from_publication(pub['content'])
+                            ok, result = create_meistertask_task(
+                                pub['process_number'], parties, pub['content'], section_id, api_token
+                            )
+                            if ok:
+                                success_count += 1
+                                success_tasks.append(pub['process_number'])
                             else:
                                 error_count += 1
-                                errors.append(f"✗ Tarefa ID {task_id}: {message}")
-                            
-                            time.sleep(0.3)  # Evita rate limiting
-                        
+                                errors.append(f"{pub['process_number']}: {result}")
+                            time.sleep(0.5)
+
                         progress_bar.empty()
                         status_text.empty()
-                        
-                        # Mostrar resultados
-                        st.markdown("---")
-                        st.subheader("📊 Resultado da Exclusão")
-                        
-                        # Resumo em colunas
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("✅ Deletadas", success_count)
-                        with col2:
-                            st.metric("⚠️ Já Deletadas", already_deleted_count)
-                        with col3:
-                            st.metric("❌ Erros", error_count)
-                        
-                        # Detalhes
-                        if success_count > 0:
-                            with st.expander(f"✅ Ver {success_count} tarefas deletadas com sucesso", expanded=False):
-                                for msg in success_messages:
-                                    if msg.startswith("✓"):
-                                        st.success(msg)
-                        
-                        if already_deleted_count > 0:
-                            with st.expander(f"⚠️ Ver {already_deleted_count} tarefas já deletadas (404)", expanded=True):
-                                st.info("Estas tarefas retornaram erro 404 (NOT_FOUND), o que indica que já foram deletadas anteriormente ou não existem mais.")
-                                for msg in success_messages:
-                                    if msg.startswith("⚠️"):
-                                        st.warning(msg)
-                        
-                        if error_count > 0:
-                            with st.expander(f"❌ Ver {error_count} erros reais", expanded=True):
-                                st.error("Estes erros precisam de atenção:")
-                                for error in errors:
-                                    st.code(error)
-                        
-                        # Mensagem final
-                        total_processed = success_count + already_deleted_count
-                        if error_count == 0:
-                            st.balloons()
-                            st.success(f"🎉 Processo concluído! {total_processed} tarefas processadas sem erros.")
-                        else:
-                            st.warning(f"⚠️ Processo concluído com {error_count} erro(s). {total_processed} tarefas processadas com sucesso.")
-                        
-                        st.info("💡 Clique em 'Reiniciar Processo' na barra lateral para buscar novamente.")
-                        
-                        # Limpar estado após exclusão
-                        st.session_state.found_duplicates = None
-                        st.session_state.found_tasks = None
-        else:
-            st.info("✅ Todas as tarefas duplicadas estão marcadas para manter. Não há nada para excluir.")
-    
-    elif st.session_state.found_tasks is not None:
-        # Buscou tarefas mas não encontrou duplicatas
-        st.success("✅ Nenhuma duplicata encontrada! Todas as tarefas têm números de processo únicos.")
-        st.balloons()
+                        st.session_state.task_creation_results = {
+                            'success_count': success_count,
+                            'error_count': error_count,
+                            'errors': errors,
+                            'success_tasks': success_tasks
+                        }
+
+            # Resultados
+            if st.session_state.task_creation_results:
+                r = st.session_state.task_creation_results
+                st.markdown('---')
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.success(f"✅ {r['success_count']} tarefa(s) criada(s)")
+                    if r['success_tasks']:
+                        with st.expander('Ver tarefas criadas'):
+                            for t in r['success_tasks']: st.text(f'✓ {t}')
+                with col2:
+                    if r['error_count'] > 0:
+                        st.error(f"❌ {r['error_count']} erro(s)")
+                        with st.expander('Ver erros', expanded=True):
+                            for e in r['errors']: st.code(e, language=None)
+
+                st.markdown('---')
+                if st.button('🏠 Voltar ao início', use_container_width=True, type='primary'):
+                    go('home', reset_flow=True)
+
+# =============================================================================
+# PÁGINA: GERENCIAR DUPLICATAS
+# =============================================================================
+elif st.session_state.page == 'duplicatas':
+    render_sidebar_back()
+
+    st.subheader('🔍 Gerenciar Duplicatas')
+    st.caption('Identifica e remove tarefas com o mesmo número de processo na seção **Publicações**.')
+    st.markdown('---')
+
+    api_token  = load_env_var('MEISTERTASK_API_TOKEN')
+    section_id = load_env_var('MEISTERTASK_SECTION_ID')
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if api_token: st.success(f'🔑 API Token configurado (`...{api_token[-8:]}`)')
+        else:         st.error('🔑 API Token não configurado')
+    with col2:
+        if section_id: st.success(f'📌 Section ID: `{section_id}`')
+        else:          st.error('📌 Section ID não configurado')
+
+    if not api_token or not section_id:
+        st.error('Configure as variáveis no arquivo `.env` para continuar.')
+    else:
+        _, col_btn, _ = st.columns([1, 2, 1])
+        with col_btn:
+            if st.button('🔄 Buscar tarefas', use_container_width=True, type='primary'):
+                with st.spinner('Buscando tarefas...'):
+                    ok, result = list_meistertask_tasks(section_id, api_token)
+                    if ok:
+                        st.session_state.found_tasks = result
+                        st.session_state.found_duplicates = find_duplicate_tasks(result)
+                        st.success(f'{len(result)} tarefas carregadas.')
+                    else:
+                        st.error(f'Erro: {result}')
+
+        if st.session_state.found_duplicates:
+            duplicates = st.session_state.found_duplicates
+            st.warning(f'⚠️ {len(duplicates)} processo(s) com duplicatas encontrados.')
+            st.markdown('---')
+            st.info('Marque as tarefas que deseja **MANTER**. As desmarcadas serão excluídas.')
+
+            tasks_to_keep = []
+            for p_idx, (proc_num, task_list) in enumerate(duplicates.items()):
+                with st.expander(f'📂 {proc_num}  ({len(task_list)} duplicatas)', expanded=True):
+                    for idx, task in enumerate(task_list, 1):
+                        task_id = task.get('id')
+                        col_ck, col_info = st.columns([1, 9])
+                        with col_ck:
+                            if st.checkbox('Manter', value=(idx == 1),
+                                           key=f'keep_{p_idx}_{idx}_{task_id}',
+                                           label_visibility='collapsed'):
+                                tasks_to_keep.append(task_id)
+                        with col_info:
+                            created = task.get('created_at', '')[:10]
+                            st.markdown(f'**{idx}.** `{task.get("name","")}` — criada em {created}')
+
+            all_ids    = [t['id'] for tl in duplicates.values() for t in tl]
+            to_delete  = [tid for tid in all_ids if tid not in tasks_to_keep]
+
+            st.markdown('---')
+            col1, col2, col3 = st.columns(3)
+            col1.metric('Total de duplicatas', len(all_ids))
+            col2.metric('Manter', len(tasks_to_keep))
+            col3.metric('Excluir', len(to_delete))
+
+            if to_delete:
+                st.markdown('---')
+                st.warning(f'⚠️ {len(to_delete)} tarefa(s) serão movidas para a lixeira. Esta ação não pode ser desfeita!')
+                _, col_conf, _ = st.columns([1, 2, 1])
+                with col_conf:
+                    if st.checkbox('Confirmo a exclusão', key='confirm_delete'):
+                        if st.button('🗑️ Excluir tarefas selecionadas', use_container_width=True, type='primary'):
+                            progress_bar = st.progress(0)
+                            status_text  = st.empty()
+                            success_count = already_count = error_count = 0
+                            errors = []
+
+                            for idx, tid in enumerate(to_delete, 1):
+                                status_text.text(f'Excluindo {idx}/{len(to_delete)}...')
+                                progress_bar.progress(idx / len(to_delete))
+                                ok, msg = delete_meistertask_task(tid, api_token)
+                                if ok:
+                                    if '404' in msg or 'já estava' in msg:
+                                        already_count += 1
+                                    else:
+                                        success_count += 1
+                                else:
+                                    error_count += 1
+                                    errors.append(msg)
+                                time.sleep(0.3)
+
+                            progress_bar.empty()
+                            status_text.empty()
+
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric('✅ Excluídas', success_count)
+                            col2.metric('⚠️ Já excluídas', already_count)
+                            col3.metric('❌ Erros', error_count)
+
+                            if error_count == 0:
+                                st.balloons()
+                                st.success('Concluído sem erros!')
+                            else:
+                                for e in errors: st.code(e)
+
+                            st.session_state.found_duplicates = None
+                            st.session_state.found_tasks = None
+            else:
+                st.info('✅ Todas as duplicatas estão marcadas para manter.')
+
+        elif st.session_state.found_tasks is not None:
+            st.success('✅ Nenhuma duplicata encontrada!')
+            st.balloons()
 
 # Footer
-st.markdown("---")
-st.caption("📧 Sistema de Automação Gmail → MeisterTask | Desenvolvido com Streamlit")
-# v2.0
+st.markdown('---')
+st.caption('📧 Sistema de Automação Gmail → MeisterTask')
